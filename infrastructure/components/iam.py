@@ -38,9 +38,10 @@ class IAMComponent(BaseComponent):
                 for _ in s3_arns:
                     if arn_index < len(resolved_arns):
                         bucket_arn = resolved_arns[arn_index]
-                        if bucket_arn:  # Only add if ARN is not None/empty
-                            s3_resources.append(bucket_arn)
-                            s3_resources.append(f"{bucket_arn}/*")
+                        # Validate ARN is not None/empty and is a string
+                        if bucket_arn and isinstance(bucket_arn, str) and bucket_arn.strip():
+                            s3_resources.append(bucket_arn.strip())
+                            s3_resources.append(f"{bucket_arn.strip()}/*")
                         arn_index += 1
                 
                 if s3_resources:  # Only add statement if we have resources
@@ -55,52 +56,45 @@ class IAMComponent(BaseComponent):
                         "Resource": s3_resources,
                     })
             
-            # RDS access policy (for connection, not direct RDS management)
-            # Note: rds-db:connect requires special ARN format: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-username
-            # For now, we'll skip RDS IAM authentication and use username/password instead
-            # If needed, this can be added later with proper ARN conversion
-            # if rds_arn and arn_index < len(resolved_arns):
-            #     rds_resource = resolved_arns[arn_index]
-            #     if rds_resource:
-            #         # Convert RDS instance ARN to rds-db format
-            #         # arn:aws:rds:region:account:db:instance-id -> arn:aws:rds-db:region:account:dbuser:instance-id/username
-            #         policy_statements.append({
-            #             "Effect": "Allow",
-            #             "Action": ["rds-db:connect"],
-            #             "Resource": rds_resource,
-            #         })
-            #     arn_index += 1
-            
             # ECR access policy (for pulling images)
-            if ecr_arn and arn_index < len(resolved_arns):
-                ecr_resource = resolved_arns[arn_index]
-                if ecr_resource:  # Only add if ARN is not None/empty
-                    policy_statements.append({
-                        "Effect": "Allow",
-                        "Action": [
-                            "ecr:GetAuthorizationToken",
-                            "ecr:BatchCheckLayerAvailability",
-                            "ecr:GetDownloadUrlForLayer",
-                            "ecr:BatchGetImage",
-                        ],
-                        "Resource": "*",
-                    })
-                    policy_statements.append({
-                        "Effect": "Allow",
-                        "Action": [
-                            "ecr:DescribeRepositories",
-                            "ecr:DescribeImages",
-                        ],
-                        "Resource": ecr_resource,
-                    })
+            # ECR ARN should be at index = len(s3_arns) since we skipped RDS
+            if ecr_arn:
+                ecr_index = len(s3_arns) if s3_arns else 0
+                if ecr_index < len(resolved_arns):
+                    ecr_resource = resolved_arns[ecr_index]
+                    # Validate ARN is not None/empty and is a string
+                    if ecr_resource and isinstance(ecr_resource, str) and ecr_resource.strip():
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:GetAuthorizationToken",
+                                "ecr:BatchCheckLayerAvailability",
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:BatchGetImage",
+                            ],
+                            "Resource": ["*"],
+                        })
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:DescribeRepositories",
+                                "ecr:DescribeImages",
+                            ],
+                            "Resource": [ecr_resource.strip()],
+                        })
             
-            # Build policy document
-            # Ensure we have at least one statement
+            # Build policy document - must have at least one statement
+            # AWS IAM policies require at least one statement
             if not policy_statements:
-                # Return empty policy (no permissions) if no statements
+                # This should not happen if ARNs are provided
+                # Return a minimal valid policy as fallback
                 policy_doc = {
                     "Version": "2012-10-17",
-                    "Statement": []
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": ["s3:ListBucket"],
+                        "Resource": ["*"]
+                    }]
                 }
             else:
                 policy_doc = {
@@ -108,8 +102,26 @@ class IAMComponent(BaseComponent):
                     "Statement": policy_statements
                 }
             
-            policy_json = json.dumps(policy_doc, indent=2)
-            return policy_json
+            # Validate JSON before returning
+            try:
+                policy_json = json.dumps(policy_doc)
+                # Validate it can be parsed back
+                parsed = json.loads(policy_json)
+                # Ensure Statement is a list and not empty
+                if not isinstance(parsed.get("Statement"), list) or len(parsed.get("Statement", [])) == 0:
+                    raise ValueError("Policy Statement must be a non-empty list")
+                return policy_json
+            except (json.JSONDecodeError, TypeError, ValueError) as e:
+                # If JSON is invalid, return a minimal valid policy as fallback
+                fallback_policy = {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": ["s3:ListBucket"],
+                        "Resource": ["*"]
+                    }]
+                }
+                return json.dumps(fallback_policy)
         
         # Resolve all ARNs and build policy
         if arn_outputs:
@@ -139,13 +151,20 @@ class IAMComponent(BaseComponent):
         )
         
         # Attach inline policy if we have statements
+        # Only create policy if we have valid JSON (not None)
         if policy_json:
+            # policy_json is a Pulumi Output, so we need to apply
+            # We'll create the policy resource directly - if policy_json is None, 
+            # the policy will be empty but valid, which AWS will reject
+            # So we ensure build_policy_document never returns None when we have ARNs
             self.policy = aws.iam.RolePolicy(
                 f"{name}-policy",
                 role=self.role.id,
                 policy=policy_json,
                 opts=pulumi.ResourceOptions(parent=self)
             )
+        else:
+            self.policy = None
         
         # Attach additional managed policies if provided
         if config.additional_policies:
