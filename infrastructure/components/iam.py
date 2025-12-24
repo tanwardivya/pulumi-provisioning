@@ -17,11 +17,12 @@ class IAMComponent(BaseComponent):
         ecr_arn = ecr_repository_arn or config.ecr_repository_arn
         
         # Collect all ARN outputs to resolve them together
+        # Note: RDS IAM authentication is skipped (requires special ARN format conversion)
         arn_outputs = []
         if s3_arns:
             arn_outputs.extend(s3_arns)
-        if rds_arn:
-            arn_outputs.append(rds_arn)
+        # RDS ARN not included - RDS IAM auth requires special ARN format (rds-db:connect)
+        # Connection will use username/password instead
         if ecr_arn:
             arn_outputs.append(ecr_arn)
         
@@ -55,17 +56,20 @@ class IAMComponent(BaseComponent):
                     })
             
             # RDS access policy (for connection, not direct RDS management)
-            if rds_arn and arn_index < len(resolved_arns):
-                rds_resource = resolved_arns[arn_index]
-                if rds_resource:  # Only add if ARN is not None/empty
-                    policy_statements.append({
-                        "Effect": "Allow",
-                        "Action": [
-                            "rds-db:connect",
-                        ],
-                        "Resource": rds_resource,
-                    })
-                arn_index += 1
+            # Note: rds-db:connect requires special ARN format: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-username
+            # For now, we'll skip RDS IAM authentication and use username/password instead
+            # If needed, this can be added later with proper ARN conversion
+            # if rds_arn and arn_index < len(resolved_arns):
+            #     rds_resource = resolved_arns[arn_index]
+            #     if rds_resource:
+            #         # Convert RDS instance ARN to rds-db format
+            #         # arn:aws:rds:region:account:db:instance-id -> arn:aws:rds-db:region:account:dbuser:instance-id/username
+            #         policy_statements.append({
+            #             "Effect": "Allow",
+            #             "Action": ["rds-db:connect"],
+            #             "Resource": rds_resource,
+            #         })
+            #     arn_index += 1
             
             # ECR access policy (for pulling images)
             if ecr_arn and arn_index < len(resolved_arns):
@@ -91,11 +95,21 @@ class IAMComponent(BaseComponent):
                     })
             
             # Build policy document
-            policy_doc = {
-                "Version": "2012-10-17",
-                "Statement": policy_statements
-            }
-            return json.dumps(policy_doc)
+            # Ensure we have at least one statement
+            if not policy_statements:
+                # Return empty policy (no permissions) if no statements
+                policy_doc = {
+                    "Version": "2012-10-17",
+                    "Statement": []
+                }
+            else:
+                policy_doc = {
+                    "Version": "2012-10-17",
+                    "Statement": policy_statements
+                }
+            
+            policy_json = json.dumps(policy_doc, indent=2)
+            return policy_json
         
         # Resolve all ARNs and build policy
         if arn_outputs:
