@@ -188,8 +188,8 @@ jobs:
           echo "ECR Repository: $ECR_REPO_URL"
           echo "Image Tag: $IMAGE_TAG"
           
-          # Get DB password from Parameter Store
-          DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text --region $AWS_REGION)
+          # Get DB password from Parameter Store (tolerate missing parameter)
+          DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo '')
           DB_NAME="pulumi_test_db"
           DB_USER="dbadmin"
           
