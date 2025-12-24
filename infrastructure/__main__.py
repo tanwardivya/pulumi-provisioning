@@ -66,30 +66,9 @@ yum update -y
 yum install -y docker nginx aws-cli
 systemctl start docker
 systemctl enable docker
-usermod -aG docker ec2-user
-
-# Configure Nginx to proxy to FastAPI on port 8000
-cat > /etc/nginx/conf.d/fastapi.conf << 'NGINX_EOF'
-server {
-    listen 80;
-    server_name _;
-
-    location / {
-        proxy_pass http://localhost:8000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-NGINX_EOF
-
-# Test Nginx configuration
-nginx -t
-
-# Start and enable Nginx
 systemctl start nginx
 systemctl enable nginx
+usermod -aG docker ec2-user
 
 # Get AWS region from instance metadata
 AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
