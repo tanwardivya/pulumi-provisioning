@@ -108,6 +108,17 @@ pulumi login
 
 #### Test Stack
 
+**Option 1: Edit config file directly (Recommended)**
+```bash
+cd infrastructure
+pulumi stack init test
+
+# Edit Pulumi.test.yaml and add your config values
+# Then set the secret password:
+pulumi config set --secret dbPassword <your-db-password>
+```
+
+**Option 2: Use config commands**
 ```bash
 cd infrastructure
 pulumi stack init test
@@ -117,8 +128,21 @@ pulumi config set dbName pulumi_test_db
 pulumi config set --secret dbPassword <your-db-password>
 ```
 
+**Note:** You can edit `Pulumi.test.yaml` directly - Pulumi reads from this file automatically!
+
 #### Production Stack
 
+**Option 1: Edit config file directly (Recommended)**
+```bash
+cd infrastructure
+pulumi stack init prod
+
+# Edit Pulumi.prod.yaml and add your config values
+# Then set the secret password:
+pulumi config set --secret dbPassword <your-db-password>
+```
+
+**Option 2: Use config commands**
 ```bash
 cd infrastructure
 pulumi stack init prod
@@ -129,7 +153,39 @@ pulumi config set --secret dbPassword <your-db-password>
 pulumi config set domainName yourdomain.com  # Optional
 ```
 
-### 4. Deploy Infrastructure
+**Note:** You can edit `Pulumi.prod.yaml` directly - Pulumi reads from this file automatically!
+
+### 4. Verify Before Deploying (Recommended)
+
+**Always preview changes before deploying!** This is like a "dry-run" that shows what will be created without actually creating it.
+
+```bash
+# Quick verification script (checks setup + runs preview)
+./verify-pulumi.sh
+
+# Or manually:
+cd infrastructure
+
+# Select stack
+pulumi stack select test
+
+# Preview changes (shows what will be created/updated/deleted)
+pulumi preview
+
+# Preview with detailed diff
+pulumi preview --diff
+
+# Preview in JSON format (for automation)
+pulumi preview --json
+```
+
+**What Preview Shows:**
+- ✅ Resources that will be **created** (green `+`)
+- 🔄 Resources that will be **updated** (yellow `~`)
+- ❌ Resources that will be **deleted** (red `-`)
+- No changes if everything matches current state
+
+### 5. Deploy Infrastructure
 
 ```bash
 cd infrastructure
@@ -137,11 +193,11 @@ cd infrastructure
 # Select stack
 pulumi stack select test
 
-# Preview changes
-pulumi preview
-
-# Deploy
+# Deploy (after reviewing preview)
 pulumi up
+
+# Or deploy without confirmation (for automation)
+pulumi up --yes
 ```
 
 ### 5. Set Up GitHub Actions
@@ -155,6 +211,8 @@ pulumi up
    - Add secrets:
      - `PULUMI_ACCESS_TOKEN`: Your Pulumi access token
      - `AWS_ROLE_ARN`: IAM role ARN for GitHub Actions (after OIDC setup)
+     - `DB_PASSWORD`: Database password (for test/prod environments)
+     - `DOMAIN_NAME`: (Optional) Your domain name for production
 
 3. **Set Up AWS OIDC** (for GitHub Actions)
    - Create OIDC identity provider in AWS IAM
