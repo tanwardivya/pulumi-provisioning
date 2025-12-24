@@ -13,7 +13,7 @@ class RDSConfig:
     allocated_storage: int = 20
     storage_type: str = "gp3"
     multi_az: bool = False
-    backup_retention_period: int = 7
+    backup_retention_period: int = 0  # 0 for free tier compatibility (max 1 day for free tier)
     skip_final_snapshot: bool = False
     tags: Optional[dict] = None
 
