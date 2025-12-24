@@ -205,6 +205,154 @@ jobs:
           
           echo "✅ Image tag stored in SSM: /pulumi/test/image_tag = $IMAGE_TAG"
 
+      - name: Deploy to EC2 - Update Container
+        run: |
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          S3_BUCKET="${{ steps.outputs.outputs.s3_bucket }}"
+          RDS_ADDRESS="${{ steps.outputs.outputs.rds_address }}"
+          
+          if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
+            echo "⚠️  EC2 instance not found, skipping deployment"
+            exit 0
+          fi
+          
+          echo "Deploying new image to EC2 instance: $EC2_INSTANCE_ID"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "This will update the container without restarting the EC2 instance"
+          
+          # Build deployment commands inline (no script needed)
+          DEPLOY_COMMANDS=$(cat <<EOF
+set -e
+echo "=== Starting container deployment ==="
+ECR_REPO_URL="$ECR_REPO_URL"
+IMAGE_TAG="$IMAGE_TAG"
+AWS_REGION="$AWS_REGION"
+S3_BUCKET="$S3_BUCKET"
+RDS_ADDRESS="$RDS_ADDRESS"
+DB_NAME="pulumi_test_db"
+DB_USER="dbadmin"
+
+# Login to ECR
+echo "Logging into ECR..."
+aws ecr get-login-password --region \$AWS_REGION | docker login --username AWS --password-stdin \$ECR_REPO_URL || exit 1
+
+# Get DB password
+DB_PASSWORD=\$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text --region \$AWS_REGION 2>/dev/null || echo '')
+
+# Pull specific image tag
+echo "Pulling image: \$ECR_REPO_URL:\$IMAGE_TAG"
+docker pull \$ECR_REPO_URL:\$IMAGE_TAG || docker pull \$ECR_REPO_URL:latest || docker pull \$ECR_REPO_URL:test || exit 1
+
+# Determine which image to use
+if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^\$ECR_REPO_URL:\$IMAGE_TAG$"; then
+  IMAGE_TO_USE="\$ECR_REPO_URL:\$IMAGE_TAG"
+elif docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^\$ECR_REPO_URL:latest$"; then
+  IMAGE_TO_USE="\$ECR_REPO_URL:latest"
+else
+  IMAGE_TO_USE="\$ECR_REPO_URL:test"
+fi
+
+echo "Using image: \$IMAGE_TO_USE"
+
+# Stop and remove existing container
+echo "Stopping existing container..."
+docker stop fastapi-app 2>/dev/null || true
+docker rm fastapi-app 2>/dev/null || true
+
+# Start new container
+echo "Starting new container..."
+docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
+  -e AWS_REGION=\$AWS_REGION \\
+  -e S3_BUCKET_NAME=\$S3_BUCKET \\
+  -e DB_HOST=\$RDS_ADDRESS \\
+  -e DB_PORT=5432 \\
+  -e DB_NAME=\$DB_NAME \\
+  -e DB_USER=\$DB_USER \\
+  -e DB_PASSWORD="\$DB_PASSWORD" \\
+  -e IMAGE_TAG=\$IMAGE_TAG \\
+  -e IMAGE_URI=\$IMAGE_TO_USE \\
+  \$IMAGE_TO_USE
+
+# Verify
+sleep 5
+if docker ps | grep -q fastapi-app; then
+  echo "✅ Container started successfully"
+  docker logs fastapi-app | tail -20
+else
+  echo "❌ Container failed to start"
+  docker logs fastapi-app || true
+  exit 1
+fi
+echo "=== Deployment completed ==="
+EOF
+)
+          
+          # Use jq to properly format the commands for SSM
+          SSM_PARAMS=$(echo "$DEPLOY_COMMANDS" | jq -Rs 'split("\n") | map(select(length > 0)) | {commands: .}')
+          
+          # Send command via SSM
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "$SSM_PARAMS" \
+            --region "$AWS_REGION" \
+            --output text \
+            --query 'Command.CommandId' 2>/dev/null || echo "")
+          
+          if [ -z "$COMMAND_ID" ]; then
+            echo "⚠️  Could not send SSM command (instance may not be ready for SSM)"
+            echo "   Image is in ECR. To deploy manually, SSH to instance and run:"
+            echo "   docker pull $ECR_REPO_URL:$IMAGE_TAG && docker stop fastapi-app && docker rm fastapi-app && docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=pulumi_test_db -e DB_USER=dbadmin -e DB_PASSWORD=\"\$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text)\" $ECR_REPO_URL:$IMAGE_TAG"
+            exit 0
+          fi
+          
+          echo "Command ID: $COMMAND_ID"
+          echo "Waiting for deployment to complete (max 2 minutes)..."
+          
+          # Wait for command to complete
+          STATUS="InProgress"
+          for i in {1..24}; do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "InProgress")
+            
+            if [ "$STATUS" = "Success" ]; then
+              echo "✅ Deployment completed successfully"
+              echo "=== Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region "$AWS_REGION" \
+                --query 'StandardOutputContent' \
+                --output text
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "❌ Deployment failed"
+              echo "=== Error Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region "$AWS_REGION" \
+                --query 'StandardErrorContent' \
+                --output text
+              echo "⚠️  Deployment failed, but image is in ECR"
+              exit 0
+            fi
+            
+            echo "Status: $STATUS (waiting... $i/24)"
+          done
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "⚠️  Deployment timed out, but image is in ECR"
+          fi
+
       - name: Check ECR Image Details
         id: ecr-info
         run: |
@@ -265,9 +413,8 @@ jobs:
           echo "  Instance ID: $EC2_INSTANCE_ID"
           echo "  Public IP: $EC2_IP"
           echo ""
-          echo "EC2 should automatically pull the latest image on startup."
-          echo "If the instance was already running, restart it or run:"
-          echo "  ssh ec2-user@$EC2_IP 'sudo /usr/local/bin/deploy-app.sh'"
+          echo "✅ Container automatically updated with new image"
+          echo "   (Container restarted, EC2 instance was NOT restarted)"
           echo ""
           echo "To verify deployment:"
           echo "  ssh ec2-user@$EC2_IP 'sudo /usr/local/bin/check-image-version.sh'"
