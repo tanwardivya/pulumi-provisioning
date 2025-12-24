@@ -98,24 +98,6 @@ jobs:
         with:
           pulumi-version: latest
 
-      - name: Verify Pulumi Authentication
-        run: |
-          if [ -z "${{ secrets.PULUMI_ACCESS_TOKEN }}" ]; then
-            echo "❌ Error: PULUMI_ACCESS_TOKEN secret is not set in GitHub Secrets"
-            echo "Please add it at: https://github.com/${{ github.repository }}/settings/secrets/actions"
-            exit 1
-          fi
-          echo "✅ PULUMI_ACCESS_TOKEN is set (checking validity...)"
-          export PULUMI_ACCESS_TOKEN="${{ secrets.PULUMI_ACCESS_TOKEN }}"
-          pulumi whoami || {
-            echo "❌ Error: Pulumi authentication failed"
-            echo "Please verify your PULUMI_ACCESS_TOKEN is correct"
-            exit 1
-          }
-          echo "✅ Pulumi authentication successful"
-        env:
-          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
-
       - name: Select Pulumi Stack
         working-directory: infrastructure
         run: |
