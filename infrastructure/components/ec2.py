@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.ec2_config import EC2Config
+from infrastructure.config_types.ec2_config import EC2Config
 
 
 class EC2Component(BaseComponent):

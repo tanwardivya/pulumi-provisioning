@@ -1,11 +1,11 @@
 """Configuration management for Pulumi stacks."""
 import pulumi
-from infrastructure.types.networking_config import NetworkingConfig
-from infrastructure.types.s3_config import S3BucketConfig
-from infrastructure.types.rds_config import RDSConfig
-from infrastructure.types.ec2_config import EC2Config
-from infrastructure.types.iam_config import IAMConfig
-from infrastructure.types.ecr_config import ECRConfig
+from infrastructure.config_types.networking_config import NetworkingConfig
+from infrastructure.config_types.s3_config import S3BucketConfig
+from infrastructure.config_types.rds_config import RDSConfig
+from infrastructure.config_types.ec2_config import EC2Config
+from infrastructure.config_types.iam_config import IAMConfig
+from infrastructure.config_types.ecr_config import ECRConfig
 
 
 def get_config():

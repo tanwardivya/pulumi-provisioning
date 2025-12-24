@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.rds_config import RDSConfig
+from infrastructure.config_types.rds_config import RDSConfig
 
 
 class RDSComponent(BaseComponent):

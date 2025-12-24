@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.iam_config import IAMConfig
+from infrastructure.config_types.iam_config import IAMConfig
 
 
 class IAMComponent(BaseComponent):
@@ -16,85 +16,115 @@ class IAMComponent(BaseComponent):
         rds_arn = rds_instance_arn or config.rds_instance_arn
         ecr_arn = ecr_repository_arn or config.ecr_repository_arn
         
-        # Build policy document for EC2 role
-        policy_statements = []
-        
-        # S3 access policy
+        # Collect all ARN outputs to resolve them together
+        arn_outputs = []
         if s3_arns:
-            s3_resources = []
-            for bucket_arn in s3_arns:
-                s3_resources.append(bucket_arn)
-                s3_resources.append(f"{bucket_arn}/*")
-            
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:ListBucket",
-                ],
-                "Resource": s3_resources,
-            })
-        
-        # RDS access policy (for connection, not direct RDS management)
+            arn_outputs.extend(s3_arns)
         if rds_arn:
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "rds-db:connect",
-                ],
-                "Resource": rds_arn,
-            })
-        
-        # ECR access policy (for pulling images)
+            arn_outputs.append(rds_arn)
         if ecr_arn:
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:GetAuthorizationToken",
-                    "ecr:BatchCheckLayerAvailability",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:BatchGetImage",
-                ],
-                "Resource": "*",
-            })
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:DescribeRepositories",
-                    "ecr:DescribeImages",
-                ],
-                "Resource": ecr_arn,
-            })
+            arn_outputs.append(ecr_arn)
         
-        # Create IAM role
-        assume_role_policy = aws.iam.get_policy_document(
-            statements=[aws.iam.GetPolicyDocumentStatementArgs(
-                effect="Allow",
-                principals=[aws.iam.GetPolicyDocumentStatementPrincipalArgs(
-                    type="Service",
-                    identifiers=["ec2.amazonaws.com"],
-                )],
-                actions=["sts:AssumeRole"],
-            )]
-        )
+        # Build policy document after ARNs are resolved
+        def build_policy_document(*resolved_arns):
+            import json
+            policy_statements = []
+            arn_index = 0
+            
+            # S3 access policy
+            if s3_arns:
+                s3_resources = []
+                for _ in s3_arns:
+                    bucket_arn = resolved_arns[arn_index]
+                    s3_resources.append(bucket_arn)
+                    s3_resources.append(f"{bucket_arn}/*")
+                    arn_index += 1
+                
+                policy_statements.append({
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3:GetObject",
+                        "s3:PutObject",
+                        "s3:DeleteObject",
+                        "s3:ListBucket",
+                    ],
+                    "Resource": s3_resources,
+                })
+            
+            # RDS access policy (for connection, not direct RDS management)
+            if rds_arn:
+                rds_resource = resolved_arns[arn_index]
+                policy_statements.append({
+                    "Effect": "Allow",
+                    "Action": [
+                        "rds-db:connect",
+                    ],
+                    "Resource": rds_resource,
+                })
+                arn_index += 1
+            
+            # ECR access policy (for pulling images)
+            if ecr_arn:
+                ecr_resource = resolved_arns[arn_index]
+                policy_statements.append({
+                    "Effect": "Allow",
+                    "Action": [
+                        "ecr:GetAuthorizationToken",
+                        "ecr:BatchCheckLayerAvailability",
+                        "ecr:GetDownloadUrlForLayer",
+                        "ecr:BatchGetImage",
+                    ],
+                    "Resource": "*",
+                })
+                policy_statements.append({
+                    "Effect": "Allow",
+                    "Action": [
+                        "ecr:DescribeRepositories",
+                        "ecr:DescribeImages",
+                    ],
+                    "Resource": ecr_resource,
+                })
+            
+            # Build policy document
+            policy_doc = {
+                "Version": "2012-10-17",
+                "Statement": policy_statements
+            }
+            return json.dumps(policy_doc)
+        
+        # Resolve all ARNs and build policy
+        if arn_outputs:
+            policy_json = pulumi.Output.all(*arn_outputs).apply(build_policy_document)
+        else:
+            # No policy statements needed
+            policy_json = None
+        
+        # Create IAM role with assume role policy
+        import json
+        assume_role_policy_json = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "ec2.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+            }]
+        })
         
         self.role = aws.iam.Role(
             f"{name}-role",
-            assume_role_policy=assume_role_policy.json,
+            assume_role_policy=assume_role_policy_json,
             tags=config.tags or {},
             opts=pulumi.ResourceOptions(parent=self)
         )
         
         # Attach inline policy if we have statements
-        if policy_statements:
-            policy_doc = aws.iam.get_policy_document(statements=policy_statements)
-            
+        if policy_json:
             self.policy = aws.iam.RolePolicy(
                 f"{name}-policy",
                 role=self.role.id,
-                policy=policy_doc.json,
+                policy=policy_json,
                 opts=pulumi.ResourceOptions(parent=self)
             )
         

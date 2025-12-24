@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.networking_config import NetworkingConfig
+from infrastructure.config_types.networking_config import NetworkingConfig
 
 
 class NetworkingComponent(BaseComponent):
