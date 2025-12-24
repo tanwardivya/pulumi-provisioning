@@ -47,7 +47,7 @@ iam = IAMComponent(
     f"{stack}-iam",
     config["iam"],
     s3_bucket_arns=[s3.bucket_arn],
-    rds_instance_arn=pulumi.Output.all(rds.db_instance.arn).apply(lambda args: args[0]),
+    rds_instance_arn=rds.db_instance.arn,  # Direct Output, no need for apply
     ecr_repository_arn=ecr.repository_arn
 )
 

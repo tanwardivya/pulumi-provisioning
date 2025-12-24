@@ -32,58 +32,63 @@ class IAMComponent(BaseComponent):
             arn_index = 0
             
             # S3 access policy
-            if s3_arns:
+            if s3_arns and len(s3_arns) > 0:
                 s3_resources = []
                 for _ in s3_arns:
-                    bucket_arn = resolved_arns[arn_index]
-                    s3_resources.append(bucket_arn)
-                    s3_resources.append(f"{bucket_arn}/*")
-                    arn_index += 1
+                    if arn_index < len(resolved_arns):
+                        bucket_arn = resolved_arns[arn_index]
+                        if bucket_arn:  # Only add if ARN is not None/empty
+                            s3_resources.append(bucket_arn)
+                            s3_resources.append(f"{bucket_arn}/*")
+                        arn_index += 1
                 
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "s3:GetObject",
-                        "s3:PutObject",
-                        "s3:DeleteObject",
-                        "s3:ListBucket",
-                    ],
-                    "Resource": s3_resources,
-                })
+                if s3_resources:  # Only add statement if we have resources
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:GetObject",
+                            "s3:PutObject",
+                            "s3:DeleteObject",
+                            "s3:ListBucket",
+                        ],
+                        "Resource": s3_resources,
+                    })
             
             # RDS access policy (for connection, not direct RDS management)
-            if rds_arn:
+            if rds_arn and arn_index < len(resolved_arns):
                 rds_resource = resolved_arns[arn_index]
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "rds-db:connect",
-                    ],
-                    "Resource": rds_resource,
-                })
+                if rds_resource:  # Only add if ARN is not None/empty
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "rds-db:connect",
+                        ],
+                        "Resource": rds_resource,
+                    })
                 arn_index += 1
             
             # ECR access policy (for pulling images)
-            if ecr_arn:
+            if ecr_arn and arn_index < len(resolved_arns):
                 ecr_resource = resolved_arns[arn_index]
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "ecr:GetAuthorizationToken",
-                        "ecr:BatchCheckLayerAvailability",
-                        "ecr:GetDownloadUrlForLayer",
-                        "ecr:BatchGetImage",
-                    ],
-                    "Resource": "*",
-                })
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "ecr:DescribeRepositories",
-                        "ecr:DescribeImages",
-                    ],
-                    "Resource": ecr_resource,
-                })
+                if ecr_resource:  # Only add if ARN is not None/empty
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "ecr:GetAuthorizationToken",
+                            "ecr:BatchCheckLayerAvailability",
+                            "ecr:GetDownloadUrlForLayer",
+                            "ecr:BatchGetImage",
+                        ],
+                        "Resource": "*",
+                    })
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "ecr:DescribeRepositories",
+                            "ecr:DescribeImages",
+                        ],
+                        "Resource": ecr_resource,
+                    })
             
             # Build policy document
             policy_doc = {
