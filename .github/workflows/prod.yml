@@ -35,6 +35,8 @@ jobs:
       - name: Install Pulumi dependencies
         working-directory: infrastructure
         run: |
+          uv venv
+          source .venv/bin/activate
           uv pip install -e ".[dev]"
 
       - name: Configure AWS credentials
@@ -50,13 +52,17 @@ jobs:
 
       - name: Select Pulumi Stack
         working-directory: infrastructure
-        run: pulumi stack select ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          pulumi stack select ${{ env.PULUMI_STACK }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Set Pulumi Config from GitHub Secrets
         working-directory: infrastructure
         run: |
+          source .venv/bin/activate
           # Pulumi automatically reads from Pulumi.prod.yaml (checked out from git)
           # Override secrets from GitHub Secrets (more secure than storing in YAML)
           if [ -n "${{ secrets.DB_PASSWORD }}" ]; then
@@ -68,23 +74,31 @@ jobs:
           fi
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Pulumi Preview
         working-directory: infrastructure
-        run: pulumi preview --stack ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          pulumi preview --stack ${{ env.PULUMI_STACK }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Pulumi Up (Production)
         working-directory: infrastructure
-        run: pulumi up --yes --stack ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          pulumi up --yes --stack ${{ env.PULUMI_STACK }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Get Pulumi outputs
         id: outputs
         working-directory: infrastructure
         run: |
+          source .venv/bin/activate
           ECR_REPO_URL=$(pulumi stack output ecr_repository_url --stack ${{ env.PULUMI_STACK }})
           ECR_REPO_NAME=$(pulumi stack output ecr_repository_name --stack ${{ env.PULUMI_STACK }})
           EC2_IP=$(pulumi stack output ec2_public_ip --stack ${{ env.PULUMI_STACK }})
@@ -102,6 +116,7 @@ jobs:
           echo "image_tag=$VERSION" >> $GITHUB_OUTPUT
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Login to Amazon ECR
         id: login-ecr
