@@ -167,7 +167,85 @@ else
     exit 1
 fi
 
+# Create systemd service for automatic container updates
+echo "Creating systemd service for automatic container updates..."
+cat > /etc/systemd/system/fastapi-updater.service << 'SERVICE_EOF'
+[Unit]
+Description=FastAPI Container Auto-Updater
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fastapi-update.sh
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+
+# Create update script
+cat > /usr/local/bin/fastapi-update.sh << 'SCRIPT_EOF'
+#!/bin/bash
+set -e
+
+ECR_REPO_URL="{args[0]}"
+AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+S3_BUCKET="{args[1]}"
+RDS_ADDRESS="{args[2]}"
+DB_NAME="{rds_db_name}"
+DB_USER=dbadmin
+
+# Login to ECR
+aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO_URL
+
+# Get DB password from Parameter Store
+DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/{stack_name}/db_password --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo '')
+
+# Pull latest image
+docker pull $ECR_REPO_URL:latest || docker pull $ECR_REPO_URL:test || true
+
+# Restart container if it's not running
+if ! docker ps | grep -q fastapi-app; then
+    echo "Container not running, starting it..."
+    docker stop fastapi-app 2>/dev/null || true
+    docker rm fastapi-app 2>/dev/null || true
+    docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \
+      -e AWS_REGION=$AWS_REGION \
+      -e S3_BUCKET_NAME=$S3_BUCKET \
+      -e DB_HOST=$RDS_ADDRESS \
+      -e DB_PORT=5432 \
+      -e DB_NAME=$DB_NAME \
+      -e DB_USER=$DB_USER \
+      -e DB_PASSWORD="$DB_PASSWORD" \
+      $ECR_REPO_URL:latest || $ECR_REPO_URL:test
+fi
+SCRIPT_EOF
+
+chmod +x /usr/local/bin/fastapi-update.sh
+
+# Create timer for periodic updates (every 5 minutes)
+cat > /etc/systemd/system/fastapi-updater.timer << 'TIMER_EOF'
+[Unit]
+Description=FastAPI Container Auto-Updater Timer
+Requires=fastapi-updater.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target
+TIMER_EOF
+
+# Enable and start the timer
+systemctl daemon-reload
+systemctl enable fastapi-updater.timer
+systemctl start fastapi-updater.timer
+
 echo "=== User data script completed ==="
+echo "Automatic container updater service installed and enabled"
 date
 """
 )

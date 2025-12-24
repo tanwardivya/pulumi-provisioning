@@ -141,10 +141,18 @@ jobs:
           ECR_REPO_URL=$(pulumi stack output ecr_repository_url --stack ${{ env.PULUMI_STACK }})
           ECR_REPO_NAME=$(pulumi stack output ecr_repository_name --stack ${{ env.PULUMI_STACK }})
           EC2_IP=$(pulumi stack output ec2_public_ip --stack ${{ env.PULUMI_STACK }})
+          EC2_INSTANCE_ID=$(pulumi stack output ec2_instance_id --stack ${{ env.PULUMI_STACK }})
+          S3_BUCKET=$(pulumi stack output s3_bucket_name --stack ${{ env.PULUMI_STACK }})
+          RDS_ENDPOINT=$(pulumi stack output rds_endpoint --stack ${{ env.PULUMI_STACK }})
+          RDS_ADDRESS=$(pulumi stack output rds_address --stack ${{ env.PULUMI_STACK }})
           IMAGE_TAG="${GITHUB_SHA::8}"
           echo "ecr_repo_url=$ECR_REPO_URL" >> $GITHUB_OUTPUT
           echo "ecr_repo_name=$ECR_REPO_NAME" >> $GITHUB_OUTPUT
           echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+          echo "ec2_instance_id=$EC2_INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "rds_address=$RDS_ADDRESS" >> $GITHUB_OUTPUT
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
@@ -167,11 +175,116 @@ jobs:
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:test
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Deploy to EC2
+      - name: Deploy to EC2 - Restart Container
         run: |
-          echo "EC2 deployment - image pushed to ECR"
-          echo "ECR Repository: ${{ steps.outputs.outputs.ecr_repo_url }}"
-          echo "Image Tag: ${{ steps.outputs.outputs.image_tag }}"
-          echo "EC2 IP: ${{ steps.outputs.outputs.ec2_ip }}"
-          echo "EC2 will pull image from ECR on next restart or via user data script"
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
+          IMAGE_TAG="${{ steps.outputs.outputs.image_tag }}"
+          S3_BUCKET="${{ steps.outputs.outputs.s3_bucket }}"
+          RDS_ADDRESS="${{ steps.outputs.outputs.rds_address }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          
+          echo "Deploying to EC2 instance: $EC2_INSTANCE_ID"
+          echo "ECR Repository: $ECR_REPO_URL"
+          echo "Image Tag: $IMAGE_TAG"
+          
+          # Get DB password from Parameter Store
+          DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text --region $AWS_REGION)
+          DB_NAME="pulumi_test_db"
+          DB_USER="dbadmin"
+          
+          # Create JSON file for SSM command parameters with proper escaping
+          # Escape special characters in variables for JSON
+          ESCAPED_DB_PASSWORD=$(echo "$DB_PASSWORD" | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+          
+          cat > /tmp/ssm-params.json <<EOF
+          {
+            "commands": [
+              "set -e",
+              "echo '=== Starting container deployment ==='",
+              "AWS_REGION='$AWS_REGION'",
+              "ECR_REPO_URL='$ECR_REPO_URL'",
+              "IMAGE_TAG='$IMAGE_TAG'",
+              "S3_BUCKET='$S3_BUCKET'",
+              "RDS_ADDRESS='$RDS_ADDRESS'",
+              "DB_PASSWORD='$ESCAPED_DB_PASSWORD'",
+              "DB_NAME='$DB_NAME'",
+              "DB_USER='$DB_USER'",
+              "aws ecr get-login-password --region \\\"\\$AWS_REGION\\\" | docker login --username AWS --password-stdin \\\"\\$ECR_REPO_URL\\\"",
+              "docker pull \\\"\\$ECR_REPO_URL:\\$IMAGE_TAG\\\" || docker pull \\\"\\$ECR_REPO_URL:latest\\\" || docker pull \\\"\\$ECR_REPO_URL:test\\\"",
+              "docker stop fastapi-app 2>/dev/null || true",
+              "docker rm fastapi-app 2>/dev/null || true",
+              "IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:\\$IMAGE_TAG\\\"",
+              "if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$IMAGE_TO_USE\\$\\\"; then",
+              "  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$ECR_REPO_URL:latest\\$\\\"; then",
+              "    IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:latest\\\"",
+              "  elif docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$ECR_REPO_URL:test\\$\\\"; then",
+              "    IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:test\\\"",
+              "  fi",
+              "fi",
+              "docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=\\\"\\$AWS_REGION\\\" -e S3_BUCKET_NAME=\\\"\\$S3_BUCKET\\\" -e DB_HOST=\\\"\\$RDS_ADDRESS\\\" -e DB_PORT=5432 -e DB_NAME=\\\"\\$DB_NAME\\\" -e DB_USER=\\\"\\$DB_USER\\\" -e DB_PASSWORD=\\\"\\$DB_PASSWORD\\\" \\\"\\$IMAGE_TO_USE\\\"",
+              "sleep 5",
+              "if docker ps | grep -q fastapi-app; then",
+              "  echo '✅ Container started successfully'",
+              "  docker logs fastapi-app | tail -20",
+              "else",
+              "  echo '❌ Container failed to start'",
+              "  docker logs fastapi-app || true",
+              "  exit 1",
+              "fi"
+            ]
+          }
+          EOF
+          
+          # Execute deployment via SSM
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters file:///tmp/ssm-params.json \
+            --region $AWS_REGION \
+            --output text \
+            --query 'Command.CommandId')
+          
+          echo "Command ID: $COMMAND_ID"
+          
+          # Wait for command to complete (max 2 minutes)
+          echo "Waiting for deployment to complete..."
+          STATUS="InProgress"
+          for i in {1..24}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --region $AWS_REGION \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "InProgress")
+            
+            if [ "$STATUS" = "Success" ]; then
+              echo "✅ Deployment completed successfully"
+              echo "=== Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region $AWS_REGION \
+                --query 'StandardOutputContent' \
+                --output text
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "❌ Deployment failed"
+              echo "=== Error Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region $AWS_REGION \
+                --query 'StandardErrorContent' \
+                --output text
+              exit 1
+            fi
+            
+            echo "Status: $STATUS (waiting... $i/24)"
+            sleep 5
+          done
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "⚠️ Deployment timed out, but may have succeeded. Check EC2 instance manually."
+          fi
 
