@@ -2,7 +2,7 @@
 name = "fastapi-app"
 version = "1.0.0"
 description = "FastAPI application with S3 and RDS operations"
-readme = "../README.md"
+readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
