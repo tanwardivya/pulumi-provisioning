@@ -160,6 +160,13 @@ class NetworkingComponent(BaseComponent):
                     cidr_blocks=["0.0.0.0/0"],
                     description="HTTPS"
                 ),
+                aws.ec2.SecurityGroupIngressArgs(
+                    protocol="tcp",
+                    from_port=8000,
+                    to_port=8000,
+                    cidr_blocks=["0.0.0.0/0"],
+                    description="FastAPI direct access"
+                ),
             ],
             egress=[aws.ec2.SecurityGroupEgressArgs(
                 protocol="-1",
