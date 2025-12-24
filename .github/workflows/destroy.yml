@@ -21,6 +21,9 @@ env:
 jobs:
   destroy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     environment:
       name: ${{ github.event.inputs.stack }}-destroy
     steps:
