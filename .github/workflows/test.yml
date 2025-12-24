@@ -177,6 +177,11 @@ jobs:
 
       - name: Deploy to EC2 - Restart Container
         run: |
+          # Install jq if not available (should be pre-installed on GitHub runners)
+          if ! command -v jq &> /dev/null; then
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
           IMAGE_TAG="${{ steps.outputs.outputs.image_tag }}"
@@ -193,54 +198,74 @@ jobs:
           DB_NAME="pulumi_test_db"
           DB_USER="dbadmin"
           
-          # Create JSON file for SSM command parameters with proper escaping
-          # Escape special characters in variables for JSON
-          ESCAPED_DB_PASSWORD=$(echo "$DB_PASSWORD" | sed 's/"/\\"/g' | sed "s/'/\\'/g")
+          # Build JSON using jq - export actual values, then use shell variables in commands
+          SSM_PARAMS=$(jq -n \
+            --arg aws_region "$AWS_REGION" \
+            --arg ecr_url "$ECR_REPO_URL" \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg s3_bucket "$S3_BUCKET" \
+            --arg rds_addr "$RDS_ADDRESS" \
+            --arg db_pass "$DB_PASSWORD" \
+            --arg db_name "$DB_NAME" \
+            --arg db_user "$DB_USER" \
+            --arg full_image "$ECR_REPO_URL:$IMAGE_TAG" \
+            --arg fallback_latest "$ECR_REPO_URL:latest" \
+            --arg fallback_test "$ECR_REPO_URL:test" \
+            '{
+              "commands": [
+                "set -e",
+                "echo === Starting container deployment ===",
+                ("export AWS_REGION=" + ($aws_region | @sh)),
+                ("export ECR_REPO_URL=" + ($ecr_url | @sh)),
+                ("export IMAGE_TAG=" + ($image_tag | @sh)),
+                ("export S3_BUCKET=" + ($s3_bucket | @sh)),
+                ("export RDS_ADDRESS=" + ($rds_addr | @sh)),
+                ("export DB_PASSWORD=" + ($db_pass | @sh)),
+                ("export DB_NAME=" + ($db_name | @sh)),
+                ("export DB_USER=" + ($db_user | @sh)),
+                "aws ecr get-login-password --region \"$AWS_REGION\" | docker login --username AWS --password-stdin \"$ECR_REPO_URL\"",
+                "echo Pulling latest image...",
+                ("docker pull \"" + $fallback_latest + "\" || docker pull \"" + $fallback_test + "\" || docker pull \"" + $full_image + "\""),
+                "docker stop fastapi-app 2>/dev/null || true",
+                "docker rm fastapi-app 2>/dev/null || true",
+                "echo Determining which image to use...",
+                ("if docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -Fxq \"" + $fallback_latest + "\"; then"),
+                ("  export IMAGE_TO_USE=\"" + $fallback_latest + "\""),
+                ("  echo Using latest tag"),
+                ("elif docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -Fxq \"" + $fallback_test + "\"; then"),
+                ("  export IMAGE_TO_USE=\"" + $fallback_test + "\""),
+                ("  echo Using test tag"),
+                ("elif docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -Fxq \"" + $full_image + "\"; then"),
+                ("  export IMAGE_TO_USE=\"" + $full_image + "\""),
+                ("  echo Using specific tag: " + $image_tag),
+                ("else"),
+                ("  echo ERROR: No image found! Available images:"),
+                ("  docker images | grep " + ($ecr_url | split("/")[0]) + " || true"),
+                ("  exit 1"),
+                ("fi"),
+                ("echo Using image: $IMAGE_TO_USE"),
+                ("docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=\"$AWS_REGION\" -e S3_BUCKET_NAME=\"$S3_BUCKET\" -e DB_HOST=\"$RDS_ADDRESS\" -e DB_PORT=5432 -e DB_NAME=\"$DB_NAME\" -e DB_USER=\"$DB_USER\" -e DB_PASSWORD=\"$DB_PASSWORD\" \"$IMAGE_TO_USE\""),
+                "sleep 5",
+                "if docker ps | grep -q fastapi-app; then",
+                "  echo Container started successfully",
+                "  docker logs fastapi-app | tail -20",
+                "else",
+                "  echo Container failed to start",
+                "  docker logs fastapi-app || true",
+                "  exit 1",
+                "fi"
+              ]
+            }')
           
-          cat > /tmp/ssm-params.json <<EOF
-          {
-            "commands": [
-              "set -e",
-              "echo '=== Starting container deployment ==='",
-              "AWS_REGION='$AWS_REGION'",
-              "ECR_REPO_URL='$ECR_REPO_URL'",
-              "IMAGE_TAG='$IMAGE_TAG'",
-              "S3_BUCKET='$S3_BUCKET'",
-              "RDS_ADDRESS='$RDS_ADDRESS'",
-              "DB_PASSWORD='$ESCAPED_DB_PASSWORD'",
-              "DB_NAME='$DB_NAME'",
-              "DB_USER='$DB_USER'",
-              "aws ecr get-login-password --region \\\"\\$AWS_REGION\\\" | docker login --username AWS --password-stdin \\\"\\$ECR_REPO_URL\\\"",
-              "docker pull \\\"\\$ECR_REPO_URL:\\$IMAGE_TAG\\\" || docker pull \\\"\\$ECR_REPO_URL:latest\\\" || docker pull \\\"\\$ECR_REPO_URL:test\\\"",
-              "docker stop fastapi-app 2>/dev/null || true",
-              "docker rm fastapi-app 2>/dev/null || true",
-              "IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:\\$IMAGE_TAG\\\"",
-              "if ! docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$IMAGE_TO_USE\\$\\\"; then",
-              "  if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$ECR_REPO_URL:latest\\$\\\"; then",
-              "    IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:latest\\\"",
-              "  elif docker images --format '{{.Repository}}:{{.Tag}}' | grep -q \\\"^\\$ECR_REPO_URL:test\\$\\\"; then",
-              "    IMAGE_TO_USE=\\\"\\$ECR_REPO_URL:test\\\"",
-              "  fi",
-              "fi",
-              "docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=\\\"\\$AWS_REGION\\\" -e S3_BUCKET_NAME=\\\"\\$S3_BUCKET\\\" -e DB_HOST=\\\"\\$RDS_ADDRESS\\\" -e DB_PORT=5432 -e DB_NAME=\\\"\\$DB_NAME\\\" -e DB_USER=\\\"\\$DB_USER\\\" -e DB_PASSWORD=\\\"\\$DB_PASSWORD\\\" \\\"\\$IMAGE_TO_USE\\\"",
-              "sleep 5",
-              "if docker ps | grep -q fastapi-app; then",
-              "  echo '✅ Container started successfully'",
-              "  docker logs fastapi-app | tail -20",
-              "else",
-              "  echo '❌ Container failed to start'",
-              "  docker logs fastapi-app || true",
-              "  exit 1",
-              "fi"
-            ]
-          }
-          EOF
+          # Debug: Show the JSON (without sensitive data)
+          echo "SSM Parameters JSON (sanitized):"
+          echo "$SSM_PARAMS" | jq '.commands[0:3]' || echo "Failed to parse JSON"
           
-          # Execute deployment via SSM
+          # Execute deployment via SSM using the properly formatted JSON
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --parameters file:///tmp/ssm-params.json \
+            --parameters "$SSM_PARAMS" \
             --region $AWS_REGION \
             --output text \
             --query 'Command.CommandId')

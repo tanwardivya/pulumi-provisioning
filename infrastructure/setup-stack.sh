@@ -57,3 +57,4 @@ echo "  3. Set DB password (secret): pulumi config set --secret dbPassword <pass
 echo "  4. Review all config: pulumi config"
 echo "  5. Preview changes: pulumi preview"
 
+
