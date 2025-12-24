@@ -1,0 +1,9 @@
+name: pulumi-provisioning
+runtime:
+  name: python
+  options:
+    toolchain: uv
+    virtualenv: .venv
+    root: infrastructure
+description: AWS infrastructure provisioning with Pulumi, FastAPI, and CI/CD
+

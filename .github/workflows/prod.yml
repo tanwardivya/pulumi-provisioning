@@ -1,0 +1,124 @@
+name: Deploy to Production Environment
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+  release:
+    types: [published]
+
+env:
+  AWS_REGION: us-east-1
+  PULUMI_STACK: prod
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://${{ secrets.DOMAIN_NAME || 'yourdomain.com' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Pulumi dependencies
+        working-directory: infrastructure
+        run: |
+          uv pip install -e ".[dev]"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Pulumi
+        uses: pulumi/actions@v4
+        with:
+          pulumi-version: latest
+
+      - name: Select Pulumi Stack
+        working-directory: infrastructure
+        run: pulumi stack select ${{ env.PULUMI_STACK }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Pulumi Preview
+        working-directory: infrastructure
+        run: pulumi preview --stack ${{ env.PULUMI_STACK }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Pulumi Up (Production)
+        working-directory: infrastructure
+        run: pulumi up --yes --stack ${{ env.PULUMI_STACK }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Get Pulumi outputs
+        id: outputs
+        working-directory: infrastructure
+        run: |
+          ECR_REPO_URL=$(pulumi stack output ecr_repository_url --stack ${{ env.PULUMI_STACK }})
+          ECR_REPO_NAME=$(pulumi stack output ecr_repository_name --stack ${{ env.PULUMI_STACK }})
+          EC2_IP=$(pulumi stack output ec2_public_ip --stack ${{ env.PULUMI_STACK }})
+          S3_BUCKET=$(pulumi stack output s3_bucket_name --stack ${{ env.PULUMI_STACK }})
+          RDS_ENDPOINT=$(pulumi stack output rds_endpoint --stack ${{ env.PULUMI_STACK }})
+          VERSION=${GITHUB_REF#refs/tags/}
+          if [ -z "$VERSION" ] || [ "$VERSION" = "$GITHUB_REF" ]; then
+            VERSION=${GITHUB_SHA::8}
+          fi
+          echo "ecr_repo_url=$ECR_REPO_URL" >> $GITHUB_OUTPUT
+          echo "ecr_repo_name=$ECR_REPO_NAME" >> $GITHUB_OUTPUT
+          echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "image_tag=$VERSION" >> $GITHUB_OUTPUT
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build, tag, and push image to Amazon ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
+          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+        run: |
+          docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:prod
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:prod
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+      - name: Deploy to EC2
+        run: |
+          echo "Production deployment - image pushed to ECR"
+          echo "ECR Repository: ${{ steps.outputs.outputs.ecr_repo_url }}"
+          echo "Image Tag: ${{ steps.outputs.outputs.image_tag }}"
+          echo "EC2 IP: ${{ steps.outputs.outputs.ec2_ip }}"
+          echo "EC2 will pull image from ECR on next restart or via user data script"
+
+      - name: Health check
+        run: |
+          EC2_IP="${{ steps.outputs.outputs.ec2_ip }}"
+          if [ -n "$EC2_IP" ]; then
+            echo "Waiting for deployment to complete..."
+            sleep 30
+            curl -f http://$EC2_IP/health || curl -f https://$EC2_IP/health || exit 1
+          fi
+

@@ -1,0 +1,5 @@
+config:
+  pulumi-provisioning:aws:region: us-east-1
+  pulumi-provisioning:environment: prod
+  pulumi-provisioning:projectName: pulumi-provisioning-prod
+
