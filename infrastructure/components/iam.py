@@ -68,17 +68,18 @@ class IAMComponent(BaseComponent):
                             "Effect": "Allow",
                             "Action": [
                                 "ecr:GetAuthorizationToken",
-                                "ecr:BatchCheckLayerAvailability",
-                                "ecr:GetDownloadUrlForLayer",
-                                "ecr:BatchGetImage",
                             ],
                             "Resource": ["*"],
                         })
                         policy_statements.append({
                             "Effect": "Allow",
                             "Action": [
+                                "ecr:BatchCheckLayerAvailability",
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:BatchGetImage",
                                 "ecr:DescribeRepositories",
                                 "ecr:DescribeImages",
+                                "ecr:ListImages",
                             ],
                             "Resource": [ecr_resource.strip()],
                         })
@@ -165,6 +166,15 @@ class IAMComponent(BaseComponent):
             )
         else:
             self.policy = None
+        
+        # Attach ECR read-only managed policy (for pulling Docker images)
+        if ecr_arn:
+            aws.iam.RolePolicyAttachment(
+                f"{name}-ecr-policy",
+                role=self.role.id,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+                opts=pulumi.ResourceOptions(parent=self)
+            )
         
         # Attach additional managed policies if provided
         if config.additional_policies:
