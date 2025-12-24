@@ -60,33 +60,92 @@ stack_name = stack
 
 user_data = pulumi.Output.all(ecr_repo_url, s3_bucket_name, rds_endpoint).apply(
     lambda args: f"""#!/bin/bash
-set -e
+# Log everything to a file for debugging
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+set -x
 
-yum update -y
-yum install -y docker nginx aws-cli
-systemctl start docker
+echo "=== Starting user data script ==="
+date
+
+# Install packages (don't fail on update)
+yum update -y || true
+yum install -y docker nginx aws-cli || exit 1
+
+# Start and enable Docker
+systemctl start docker || exit 1
 systemctl enable docker
-systemctl start nginx
-systemctl enable nginx
 usermod -aG docker ec2-user
+
+# Wait for Docker to be ready
+echo "Waiting for Docker to be ready..."
+for i in $(seq 1 30); do
+    if docker info >/dev/null 2>&1; then
+        echo "Docker is ready"
+        break
+    fi
+    echo "Waiting for Docker... ($i/30)"
+    sleep 2
+done
+
+# Start and enable Nginx
+systemctl start nginx || true
+systemctl enable nginx
 
 # Get AWS region from instance metadata
 AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+echo "AWS Region: $AWS_REGION"
 
-# Login to ECR
-aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin {args[0]}
+# Login to ECR (retry up to 3 times)
+echo "Logging into ECR..."
+ECR_LOGIN_SUCCESS=false
+for i in $(seq 1 3); do
+    if aws ecr get-login-password --region $AWS_REGION 2>/dev/null | docker login --username AWS --password-stdin {args[0]} 2>/dev/null; then
+        echo "ECR login successful"
+        ECR_LOGIN_SUCCESS=true
+        break
+    fi
+    echo "ECR login attempt $i failed, retrying..."
+    sleep 5
+done
+
+if [ "$ECR_LOGIN_SUCCESS" = false ]; then
+    echo "ERROR: Failed to login to ECR after 3 attempts"
+    exit 1
+fi
 
 # Get DB password from Parameter Store
+echo "Getting DB password from Parameter Store..."
 DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/{stack_name}/db_password --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo '')
+if [ -z "$DB_PASSWORD" ]; then
+    echo "WARNING: DB password not found in Parameter Store, container may fail to connect"
+fi
 
 # Stop existing container if running
+echo "Stopping any existing container..."
 docker stop fastapi-app 2>/dev/null || true
 docker rm fastapi-app 2>/dev/null || true
 
-# Pull latest image from ECR
-docker pull {args[0]}:latest || docker pull {args[0]}:test || echo "Image pull failed, will use cached image"
+# Pull latest image from ECR (try multiple tags)
+echo "Pulling Docker image from ECR..."
+IMAGE_PULLED=false
+for tag in latest test main; do
+    if docker pull {args[0]}:$tag 2>/dev/null; then
+        echo "Successfully pulled image with tag: $tag"
+        IMAGE_TAG=$tag
+        IMAGE_PULLED=true
+        break
+    fi
+done
+
+if [ "$IMAGE_PULLED" = false ]; then
+    echo "ERROR: Failed to pull image from ECR. Available images:"
+    aws ecr list-images --repository-name pulumi-provisioning-test --region $AWS_REGION || true
+    echo "Container will not start without an image"
+    exit 1
+fi
 
 # Run FastAPI container
+echo "Starting FastAPI container..."
 docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
   -e AWS_REGION=$AWS_REGION \\
   -e S3_BUCKET_NAME={args[1]} \\
@@ -94,8 +153,22 @@ docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
   -e DB_PORT=5432 \\
   -e DB_NAME={rds_db_name} \\
   -e DB_USER=dbadmin \\
-  -e DB_PASSWORD=$DB_PASSWORD \\
-  {args[0]}:latest || echo "Container start failed - check logs: docker logs fastapi-app"
+  -e DB_PASSWORD="$DB_PASSWORD" \\
+  {args[0]}:$IMAGE_TAG
+
+# Verify container is running
+sleep 5
+if docker ps | grep -q fastapi-app; then
+    echo "✅ FastAPI container started successfully"
+    docker logs fastapi-app | tail -20
+else
+    echo "❌ FastAPI container failed to start"
+    docker logs fastapi-app || true
+    exit 1
+fi
+
+echo "=== User data script completed ==="
+date
 """
 )
 
