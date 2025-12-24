@@ -223,75 +223,54 @@ jobs:
           echo "Image Tag: $IMAGE_TAG"
           echo "This will update the container without restarting the EC2 instance"
           
-          # Build deployment commands inline (no script needed)
-          DEPLOY_COMMANDS=$(cat <<EOF
-set -e
-echo "=== Starting container deployment ==="
-ECR_REPO_URL="$ECR_REPO_URL"
-IMAGE_TAG="$IMAGE_TAG"
-AWS_REGION="$AWS_REGION"
-S3_BUCKET="$S3_BUCKET"
-RDS_ADDRESS="$RDS_ADDRESS"
-DB_NAME="pulumi_test_db"
-DB_USER="dbadmin"
-
-# Login to ECR
-echo "Logging into ECR..."
-aws ecr get-login-password --region \$AWS_REGION | docker login --username AWS --password-stdin \$ECR_REPO_URL || exit 1
-
-# Get DB password
-DB_PASSWORD=\$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text --region \$AWS_REGION 2>/dev/null || echo '')
-
-# Pull specific image tag
-echo "Pulling image: \$ECR_REPO_URL:\$IMAGE_TAG"
-docker pull \$ECR_REPO_URL:\$IMAGE_TAG || docker pull \$ECR_REPO_URL:latest || docker pull \$ECR_REPO_URL:test || exit 1
-
-# Determine which image to use
-if docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^\$ECR_REPO_URL:\$IMAGE_TAG$"; then
-  IMAGE_TO_USE="\$ECR_REPO_URL:\$IMAGE_TAG"
-elif docker images --format '{{.Repository}}:{{.Tag}}' | grep -q "^\$ECR_REPO_URL:latest$"; then
-  IMAGE_TO_USE="\$ECR_REPO_URL:latest"
-else
-  IMAGE_TO_USE="\$ECR_REPO_URL:test"
-fi
-
-echo "Using image: \$IMAGE_TO_USE"
-
-# Stop and remove existing container
-echo "Stopping existing container..."
-docker stop fastapi-app 2>/dev/null || true
-docker rm fastapi-app 2>/dev/null || true
-
-# Start new container
-echo "Starting new container..."
-docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
-  -e AWS_REGION=\$AWS_REGION \\
-  -e S3_BUCKET_NAME=\$S3_BUCKET \\
-  -e DB_HOST=\$RDS_ADDRESS \\
-  -e DB_PORT=5432 \\
-  -e DB_NAME=\$DB_NAME \\
-  -e DB_USER=\$DB_USER \\
-  -e DB_PASSWORD="\$DB_PASSWORD" \\
-  -e IMAGE_TAG=\$IMAGE_TAG \\
-  -e IMAGE_URI=\$IMAGE_TO_USE \\
-  \$IMAGE_TO_USE
-
-# Verify
-sleep 5
-if docker ps | grep -q fastapi-app; then
-  echo "✅ Container started successfully"
-  docker logs fastapi-app | tail -20
-else
-  echo "❌ Container failed to start"
-  docker logs fastapi-app || true
-  exit 1
-fi
-echo "=== Deployment completed ==="
-EOF
-)
-          
-          # Use jq to properly format the commands for SSM
-          SSM_PARAMS=$(echo "$DEPLOY_COMMANDS" | jq -Rs 'split("\n") | map(select(length > 0)) | {commands: .}')
+          # Build deployment commands using jq (no heredoc to avoid YAML issues)
+          SSM_PARAMS=$(jq -n \
+            --arg ecr_url "$ECR_REPO_URL" \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg aws_region "$AWS_REGION" \
+            --arg s3_bucket "$S3_BUCKET" \
+            --arg rds_addr "$RDS_ADDRESS" \
+            '{
+              "commands": [
+                "set -e",
+                "echo === Starting container deployment ===",
+                ("export ECR_REPO_URL=" + ($ecr_url | @sh)),
+                ("export IMAGE_TAG=" + ($image_tag | @sh)),
+                ("export AWS_REGION=" + ($aws_region | @sh)),
+                ("export S3_BUCKET=" + ($s3_bucket | @sh)),
+                ("export RDS_ADDRESS=" + ($rds_addr | @sh)),
+                "export DB_NAME=pulumi_test_db",
+                "export DB_USER=dbadmin",
+                "echo Logging into ECR...",
+                ("aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO_URL || exit 1"),
+                ("DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query '\''Parameter.Value'\'' --output text --region $AWS_REGION 2>/dev/null || echo '\'''\'' )"),
+                ("echo Pulling image: $ECR_REPO_URL:$IMAGE_TAG"),
+                ("docker pull $ECR_REPO_URL:$IMAGE_TAG || docker pull $ECR_REPO_URL:latest || docker pull $ECR_REPO_URL:test || exit 1"),
+                ("if docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -q \"^$ECR_REPO_URL:$IMAGE_TAG$\"; then"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:$IMAGE_TAG"),
+                ("elif docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -q \"^$ECR_REPO_URL:latest$\"; then"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:latest"),
+                ("else"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:test"),
+                ("fi"),
+                "echo Using image: $IMAGE_TO_USE",
+                "echo Stopping existing container...",
+                "docker stop fastapi-app 2>/dev/null || true",
+                "docker rm fastapi-app 2>/dev/null || true",
+                "echo Starting new container...",
+                ("docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=$DB_NAME -e DB_USER=$DB_USER -e DB_PASSWORD=\"$DB_PASSWORD\" -e IMAGE_TAG=$IMAGE_TAG -e IMAGE_URI=$IMAGE_TO_USE $IMAGE_TO_USE"),
+                "sleep 5",
+                "if docker ps | grep -q fastapi-app; then",
+                "  echo ✅ Container started successfully",
+                "  docker logs fastapi-app | tail -20",
+                "else",
+                "  echo ❌ Container failed to start",
+                "  docker logs fastapi-app || true",
+                "  exit 1",
+                "fi",
+                "echo === Deployment completed ==="
+              ]
+            }')
           
           # Send command via SSM
           COMMAND_ID=$(aws ssm send-command \
