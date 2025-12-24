@@ -219,9 +219,7 @@ pulumi up --yes
    - Create IAM role with trust policy for GitHub
    - Add role ARN to GitHub secrets
 
-See [OIDC_SETUP.md](OIDC_SETUP.md) for **complete step-by-step OIDC setup guide** (recommended for beginners).
-
-See [SETUP.md](SETUP.md) for general setup instructions.
+See [OIDC_SETUP.md](OIDC_SETUP.md) for complete step-by-step OIDC setup guide.
 
 ## Package Management with uv
 
@@ -363,10 +361,9 @@ pytest
 
 ## Documentation
 
-- [SETUP.md](SETUP.md) - Detailed setup instructions
-- [DEV_SETUP_STEPS.md](DEV_SETUP_STEPS.md) - Development setup
-- [IAM_PRODUCTION_SETUP.md](IAM_PRODUCTION_SETUP.md) - Production IAM setup
-- [AWS_SETUP.md](AWS_SETUP.md) - AWS configuration guide
+- [OIDC_SETUP.md](OIDC_SETUP.md) - AWS OIDC setup for GitHub Actions
+- [SECURITY.md](SECURITY.md) - Security best practices
+- [app/README.md](app/README.md) - FastAPI application documentation
 
 ## License
 

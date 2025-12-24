@@ -205,6 +205,55 @@ jobs:
           
           echo "✅ Image tag stored in SSM: /pulumi/test/image_tag = $IMAGE_TAG"
 
+      - name: Wait for EC2 SSM to be Ready
+        run: |
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          
+          if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
+            echo "⚠️  EC2 instance not found, skipping SSM wait"
+            exit 0
+          fi
+          
+          echo "Waiting for EC2 instance to be ready for SSM: $EC2_INSTANCE_ID"
+          echo "This may take 1-2 minutes for new instances..."
+          
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          SSM_READY=false
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            # Check if instance is ready for SSM by trying to describe it
+            if aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null | grep -q "Online"; then
+              echo "✅ SSM is ready (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+              SSM_READY=true
+              break
+            fi
+            
+            # Also check instance state
+            INSTANCE_STATE=$(aws ec2 describe-instances \
+              --instance-ids "$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'Reservations[0].Instances[0].State.Name' \
+              --output text 2>/dev/null || echo "unknown")
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Instance state: $INSTANCE_STATE, SSM: checking..."
+            sleep 5
+          done
+          
+          if [ "$SSM_READY" = false ]; then
+            echo "⚠️  SSM not ready after $MAX_ATTEMPTS attempts (2.5 minutes)"
+            echo "   Instance may still be initializing. Deployment will be skipped."
+            echo "   The image is in ECR and will be pulled on next deployment or instance restart."
+            exit 0
+          fi
+
       - name: Deploy to EC2 - Update Container
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
@@ -282,10 +331,10 @@ jobs:
             --query 'Command.CommandId' 2>/dev/null || echo "")
           
           if [ -z "$COMMAND_ID" ]; then
-            echo "⚠️  Could not send SSM command (instance may not be ready for SSM)"
+            echo "❌ Could not send SSM command (unexpected error after SSM wait)"
             echo "   Image is in ECR. To deploy manually, SSH to instance and run:"
             echo "   docker pull $ECR_REPO_URL:$IMAGE_TAG && docker stop fastapi-app && docker rm fastapi-app && docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=pulumi_test_db -e DB_USER=dbadmin -e DB_PASSWORD=\"\$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text)\" $ECR_REPO_URL:$IMAGE_TAG"
-            exit 0
+            exit 1
           fi
           
           echo "Command ID: $COMMAND_ID"
