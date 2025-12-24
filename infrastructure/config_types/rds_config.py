@@ -15,5 +15,6 @@ class RDSConfig:
     multi_az: bool = False
     backup_retention_period: int = 0  # 0 for free tier compatibility (max 1 day for free tier)
     skip_final_snapshot: bool = False
+    username: Optional[str] = None  # Defaults to "dbadmin" (admin is reserved in PostgreSQL)
     tags: Optional[dict] = None
 

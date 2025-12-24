@@ -94,7 +94,7 @@ docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
   -e DB_HOST={args[2]} \\
   -e DB_PORT=5432 \\
   -e DB_NAME={rds_db_name} \\
-  -e DB_USER=admin \\
+      -e DB_USER=dbadmin \\
   -e DB_PASSWORD=$DB_PASSWORD \\
   {args[0]}:latest || echo "Container start failed - check logs: docker logs fastapi-app"
 """
