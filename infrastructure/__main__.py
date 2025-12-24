@@ -76,8 +76,7 @@ AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
 # Login to ECR
 aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin {args[0]}
 
-# Get DB password from Parameter Store (should be created separately for security)
-# For now, using a placeholder - update this to use Parameter Store
+# Get DB password from Parameter Store
 DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/{stack_name}/db_password --with-decryption --query 'Parameter.Value' --output text 2>/dev/null || echo '')
 
 # Stop existing container if running
@@ -94,7 +93,7 @@ docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
   -e DB_HOST={args[2]} \\
   -e DB_PORT=5432 \\
   -e DB_NAME={rds_db_name} \\
-      -e DB_USER=dbadmin \\
+  -e DB_USER=dbadmin \\
   -e DB_PASSWORD=$DB_PASSWORD \\
   {args[0]}:latest || echo "Container start failed - check logs: docker logs fastapi-app"
 """
