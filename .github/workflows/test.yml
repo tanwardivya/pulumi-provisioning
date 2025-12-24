@@ -124,7 +124,14 @@ jobs:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
-      - name: Pulumi Up
+      - name: Generate Image Tag
+        id: image-tag
+        run: |
+          IMAGE_TAG="${GITHUB_SHA::8}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Generated image tag: $IMAGE_TAG"
+
+      - name: Pulumi Up (Create/Update Infrastructure)
         working-directory: infrastructure
         run: |
           source .venv/bin/activate
@@ -145,7 +152,6 @@ jobs:
           S3_BUCKET=$(pulumi stack output s3_bucket_name --stack ${{ env.PULUMI_STACK }})
           RDS_ENDPOINT=$(pulumi stack output rds_endpoint --stack ${{ env.PULUMI_STACK }})
           RDS_ADDRESS=$(pulumi stack output rds_address --stack ${{ env.PULUMI_STACK }})
-          IMAGE_TAG="${GITHUB_SHA::8}"
           echo "ecr_repo_url=$ECR_REPO_URL" >> $GITHUB_OUTPUT
           echo "ecr_repo_name=$ECR_REPO_NAME" >> $GITHUB_OUTPUT
           echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
@@ -153,7 +159,6 @@ jobs:
           echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
           echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
           echo "rds_address=$RDS_ADDRESS" >> $GITHUB_OUTPUT
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
@@ -163,88 +168,109 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to Amazon ECR
+        id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
-          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.image_tag }}
         run: |
+          echo "Building image with tag: $IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:test
+          # Also tag as 'latest' and 'test' for fallback, but primary tag is the commit SHA
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:test
+          echo "Pushing image with tag: $IMAGE_TAG"
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:test
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:test
+          echo "✅ Image pushed successfully with tag: $IMAGE_TAG"
+
+      - name: Store Image Tag in SSM Parameter Store
+        run: |
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          
+          echo "Storing image tag in SSM Parameter Store: $IMAGE_TAG"
+          aws ssm put-parameter \
+            --name /pulumi/test/image_tag \
+            --value "$IMAGE_TAG" \
+            --type String \
+            --region "$AWS_REGION" \
+            --overwrite 2>/dev/null || \
+          aws ssm put-parameter \
+            --name /pulumi/test/image_tag \
+            --value "$IMAGE_TAG" \
+            --type String \
+            --region "$AWS_REGION"
+          
+          echo "✅ Image tag stored in SSM: /pulumi/test/image_tag = $IMAGE_TAG"
 
       - name: Check ECR Image Details
         id: ecr-info
         run: |
           ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
           ECR_REPO_NAME="${{ steps.outputs.outputs.ecr_repo_name }}"
-          IMAGE_TAG="${{ steps.outputs.outputs.image_tag }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
           AWS_REGION="${{ env.AWS_REGION }}"
           
-          echo "Checking ECR image details..."
+          echo "Checking ECR image details for tag: $IMAGE_TAG"
           
-          # Get latest image details
-          LATEST_DIGEST=$(aws ecr describe-images \
+          # Get specific image details
+          SPECIFIC_DIGEST=$(aws ecr describe-images \
             --repository-name "$ECR_REPO_NAME" \
-            --image-ids imageTag=latest \
+            --image-ids imageTag=$IMAGE_TAG \
             --region "$AWS_REGION" \
             --query 'imageDetails[0].imageDigest' \
             --output text 2>/dev/null || echo "none")
           
-          LATEST_PUSHED=$(aws ecr describe-images \
+          SPECIFIC_PUSHED=$(aws ecr describe-images \
             --repository-name "$ECR_REPO_NAME" \
-            --image-ids imageTag=latest \
+            --image-ids imageTag=$IMAGE_TAG \
             --region "$AWS_REGION" \
             --query 'imageDetails[0].imagePushedAt' \
             --output text 2>/dev/null || echo "unknown")
           
-          SPECIFIC_DIGEST=$(aws ecr describe-images \
-            --repository-name "$ECR_REPO_NAME" \
-            --image-ids imageTag="$IMAGE_TAG" \
-            --region "$AWS_REGION" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text 2>/dev/null || echo "none")
+          echo "image_digest=$SPECIFIC_DIGEST" >> $GITHUB_OUTPUT
+          echo "image_pushed=$SPECIFIC_PUSHED" >> $GITHUB_OUTPUT
           
-          echo "latest_digest=$LATEST_DIGEST" >> $GITHUB_OUTPUT
-          echo "latest_pushed=$LATEST_PUSHED" >> $GITHUB_OUTPUT
-          echo "specific_digest=$SPECIFIC_DIGEST" >> $GITHUB_OUTPUT
-          
-          echo "✅ Latest image in ECR:"
-          echo "   Digest: $LATEST_DIGEST"
-          echo "   Pushed: $LATEST_PUSHED"
+          echo "✅ Image in ECR:"
+          echo "   Tag: $IMAGE_TAG"
+          echo "   Digest: $SPECIFIC_DIGEST"
+          echo "   Pushed: $SPECIFIC_PUSHED"
 
       - name: Deployment Info
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           EC2_IP="${{ steps.outputs.outputs.ec2_ip }}"
           ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
-          IMAGE_TAG="${{ steps.outputs.outputs.image_tag }}"
-          LATEST_DIGEST="${{ steps.ecr-info.outputs.latest_digest }}"
-          LATEST_PUSHED="${{ steps.ecr-info.outputs.latest_pushed }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          IMAGE_DIGEST="${{ steps.ecr-info.outputs.image_digest }}"
+          IMAGE_PUSHED="${{ steps.ecr-info.outputs.image_pushed }}"
           
           echo "=========================================="
-          echo "✅ Docker image built and pushed to ECR"
+          echo "✅ Deployment Complete"
           echo "=========================================="
+          echo "✅ Docker image built and pushed to ECR"
+          echo "✅ Infrastructure created/updated"
+          echo ""
           echo "ECR Repository: $ECR_REPO_URL"
-          echo "Image Tags: $IMAGE_TAG, latest, test"
-          echo "Latest Image Digest: $LATEST_DIGEST"
-          echo "Latest Image Pushed: $LATEST_PUSHED"
+          echo "Primary Image Tag: $IMAGE_TAG (commit: ${GITHUB_SHA::8})"
+          echo "Fallback Tags: latest, test"
+          if [ -n "$IMAGE_DIGEST" ] && [ "$IMAGE_DIGEST" != "none" ]; then
+            echo "Image Digest: $IMAGE_DIGEST"
+            echo "Image Pushed: $IMAGE_PUSHED"
+          fi
           echo ""
-          echo "📦 New image is available in ECR"
+          echo "EC2 Instance:"
+          echo "  Instance ID: $EC2_INSTANCE_ID"
+          echo "  Public IP: $EC2_IP"
           echo ""
-          echo "To verify what's running on EC2:"
+          echo "EC2 should automatically pull the latest image on startup."
+          echo "If the instance was already running, restart it or run:"
+          echo "  ssh ec2-user@$EC2_IP 'sudo /usr/local/bin/deploy-app.sh'"
+          echo ""
+          echo "To verify deployment:"
           echo "  ssh ec2-user@$EC2_IP 'sudo /usr/local/bin/check-image-version.sh'"
-          echo ""
-          echo "To deploy latest image to EC2:"
-          echo "  1. SSH to instance: ssh ec2-user@$EC2_IP"
-          echo "  2. Run deployment script: sudo /usr/local/bin/deploy-app.sh"
-          echo ""
-          echo "OR restart the instance to trigger user data script"
-          echo "   (user data will pull latest image on startup)"
-          echo ""
-          echo "EC2 Instance ID: $EC2_INSTANCE_ID"
-          echo "EC2 Public IP: $EC2_IP"
+          echo "  curl http://$EC2_IP:8000/health"
           echo "=========================================="
 

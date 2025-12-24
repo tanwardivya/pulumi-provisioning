@@ -84,6 +84,19 @@ class IAMComponent(BaseComponent):
                             "Resource": [ecr_resource.strip()],
                         })
             
+            # SSM Parameter Store access (for DB password and other secrets)
+            policy_statements.append({
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:DescribeParameters",
+                ],
+                "Resource": [
+                    "arn:aws:ssm:*:*:parameter/pulumi/*"
+                ],
+            })
+            
             # Build policy document - must have at least one statement
             # AWS IAM policies require at least one statement
             if not policy_statements:

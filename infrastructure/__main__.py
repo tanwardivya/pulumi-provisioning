@@ -125,48 +125,80 @@ echo "Stopping any existing container..."
 docker stop fastapi-app 2>/dev/null || true
 docker rm fastapi-app 2>/dev/null || true
 
-# Pull latest image from ECR (try multiple tags)
+# Get specific image tag from SSM Parameter Store (if available)
+echo "Getting image tag from SSM Parameter Store..."
+SPECIFIC_TAG=$(aws ssm get-parameter --name /pulumi/{stack_name}/image_tag --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo "")
+
+# Pull image from ECR (try specific tag first, then fallback)
 echo "Pulling Docker image from ECR..."
 IMAGE_PULLED=false
-for tag in latest test main; do
-    if docker pull {args[0]}:$tag 2>/dev/null; then
-        echo "Successfully pulled image with tag: $tag"
-        IMAGE_TAG=$tag
-        IMAGE_PULLED=true
-        break
+MAX_RETRIES=10
+RETRY_DELAY=30
+
+for attempt in $(seq 1 $MAX_RETRIES); do
+    echo "Attempt $attempt/$MAX_RETRIES to pull image..."
+    
+    # Try specific tag first if available
+    if [ -n "$SPECIFIC_TAG" ]; then
+        echo "Trying specific tag from SSM: $SPECIFIC_TAG"
+        if docker pull {args[0]}:$SPECIFIC_TAG 2>/dev/null; then
+            echo "Successfully pulled image with specific tag: $SPECIFIC_TAG"
+            IMAGE_TAG=$SPECIFIC_TAG
+            IMAGE_PULLED=true
+            break
+        fi
+        echo "Specific tag not available yet, trying fallback tags..."
+    fi
+    
+    # Fallback to latest, test, main
+    for tag in latest test main; do
+        if docker pull {args[0]}:$tag 2>/dev/null; then
+            echo "Successfully pulled image with fallback tag: $tag"
+            IMAGE_TAG=$tag
+            IMAGE_PULLED=true
+            break 2
+        fi
+    done
+    
+    if [ "$IMAGE_PULLED" = false ]; then
+        if [ $attempt -lt $MAX_RETRIES ]; then
+            echo "Image not available yet, waiting $RETRY_DELAY seconds before retry..."
+            sleep $RETRY_DELAY
+        fi
     fi
 done
 
 if [ "$IMAGE_PULLED" = false ]; then
-    echo "ERROR: Failed to pull image from ECR. Available images:"
-    aws ecr list-images --repository-name pulumi-provisioning-test --region $AWS_REGION || true
-    echo "Container will not start without an image"
-    exit 1
-fi
-
-# Run FastAPI container
-echo "Starting FastAPI container..."
-docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
-  -e AWS_REGION=$AWS_REGION \\
-  -e S3_BUCKET_NAME={args[1]} \\
-  -e DB_HOST={args[2]} \\
-  -e DB_PORT=5432 \\
-  -e DB_NAME={rds_db_name} \\
-  -e DB_USER=dbadmin \\
-  -e DB_PASSWORD="$DB_PASSWORD" \\
-  -e IMAGE_TAG=$IMAGE_TAG \\
-  -e IMAGE_URI={args[0]}:$IMAGE_TAG \\
-  {args[0]}:$IMAGE_TAG
-
-# Verify container is running
-sleep 5
-if docker ps | grep -q fastapi-app; then
-    echo "✅ FastAPI container started successfully"
-    docker logs fastapi-app | tail -20
+    echo "WARNING: Failed to pull image from ECR after $MAX_RETRIES attempts"
+    echo "This is OK if the image hasn't been built yet."
+    echo "The container will start automatically once the image is available via the auto-updater."
+    echo "You can also manually run: sudo /usr/local/bin/deploy-app.sh"
+    echo "Skipping container start - auto-updater will handle it once image is available"
 else
-    echo "❌ FastAPI container failed to start"
-    docker logs fastapi-app || true
-    exit 1
+    # Run FastAPI container only if image was successfully pulled
+    echo "Starting FastAPI container with image tag: $IMAGE_TAG"
+    docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 \\
+      -e AWS_REGION=$AWS_REGION \\
+      -e S3_BUCKET_NAME={args[1]} \\
+      -e DB_HOST={args[2]} \\
+      -e DB_PORT=5432 \\
+      -e DB_NAME={rds_db_name} \\
+      -e DB_USER=dbadmin \\
+      -e DB_PASSWORD="$DB_PASSWORD" \\
+      -e IMAGE_TAG=$IMAGE_TAG \\
+      -e IMAGE_URI={args[0]}:$IMAGE_TAG \\
+      {args[0]}:$IMAGE_TAG
+    
+    # Verify container is running
+    sleep 5
+    if docker ps | grep -q fastapi-app; then
+        echo "✅ FastAPI container started successfully"
+        docker logs fastapi-app | tail -20
+    else
+        echo "❌ FastAPI container failed to start"
+        docker logs fastapi-app || true
+        echo "Auto-updater will retry later"
+    fi
 fi
 
 # Create systemd service for automatic container updates
@@ -256,17 +288,37 @@ if [ -z "$DB_PASSWORD" ]; then
     echo "WARNING: DB password not found in Parameter Store"
 fi
 
-# Pull latest image (try latest, then test)
-echo "Pulling latest Docker image..."
+# Get specific image tag from SSM Parameter Store (if available)
+echo "Getting image tag from SSM Parameter Store..."
+SPECIFIC_TAG=$(aws ssm get-parameter --name /pulumi/{stack_name}/image_tag --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo "")
+
+# Pull image (try specific tag first, then fallback)
+echo "Pulling Docker image..."
 IMAGE_PULLED=false
-for tag in latest test; do
-    if docker pull $ECR_REPO_URL:$tag 2>/dev/null; then
-        echo "Successfully pulled image with tag: $tag"
-        IMAGE_TAG=$tag
+
+# Try specific tag first if available
+if [ -n "$SPECIFIC_TAG" ]; then
+    echo "Trying specific tag from SSM: $SPECIFIC_TAG"
+    if docker pull $ECR_REPO_URL:$SPECIFIC_TAG 2>/dev/null; then
+        echo "Successfully pulled image with specific tag: $SPECIFIC_TAG"
+        IMAGE_TAG=$SPECIFIC_TAG
         IMAGE_PULLED=true
-        break
+    else
+        echo "Specific tag not available, trying fallback tags..."
     fi
-done
+fi
+
+# Fallback to latest, test if specific tag not available or failed
+if [ "$IMAGE_PULLED" = false ]; then
+    for tag in latest test; do
+        if docker pull $ECR_REPO_URL:$tag 2>/dev/null; then
+            echo "Successfully pulled image with fallback tag: $tag"
+            IMAGE_TAG=$tag
+            IMAGE_PULLED=true
+            break
+        fi
+    done
+fi
 
 if [ "$IMAGE_PULLED" = false ]; then
     echo "ERROR: Failed to pull image from ECR"
