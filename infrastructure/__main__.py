@@ -71,6 +71,18 @@ date
 yum update -y || true
 yum install -y docker nginx aws-cli || exit 1
 
+# Ensure SSM agent is installed and running (should be pre-installed on AL2023)
+echo "Checking SSM agent status..."
+if systemctl is-active --quiet amazon-ssm-agent; then
+    echo "SSM agent is already running"
+else
+    echo "Starting SSM agent..."
+    systemctl start amazon-ssm-agent || true
+    systemctl enable amazon-ssm-agent || true
+    # Wait a moment for agent to start
+    sleep 5
+fi
+
 # Start and enable Docker
 systemctl start docker || exit 1
 systemctl enable docker
@@ -86,6 +98,55 @@ for i in $(seq 1 30); do
     echo "Waiting for Docker... ($i/30)"
     sleep 2
 done
+
+# Configure Nginx for FastAPI reverse proxy
+echo "Configuring Nginx..."
+cat > /etc/nginx/conf.d/fastapi.conf << 'NGINX_EOF'
+upstream fastapi_backend {{
+    server 127.0.0.1:8000;
+}}
+
+# HTTP server - proxy to FastAPI (HTTPS can be added later with SSL)
+server {{
+    listen 80;
+    server_name _;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+
+    # Client body size limit
+    client_max_body_size 100M;
+
+    # Proxy settings
+    location / {{
+        proxy_pass http://fastapi_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }}
+
+    # Health check endpoint
+    location /health {{
+        proxy_pass http://fastapi_backend/health;
+        access_log off;
+    }}
+}}
+NGINX_EOF
+
+# Test nginx configuration
+nginx -t || echo "Nginx config test failed, but continuing..."
 
 # Start and enable Nginx
 systemctl start nginx || true

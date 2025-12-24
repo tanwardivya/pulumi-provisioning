@@ -189,6 +189,14 @@ class IAMComponent(BaseComponent):
                 opts=pulumi.ResourceOptions(parent=self)
             )
         
+        # Attach SSM managed instance core policy (required for SSM agent to register)
+        aws.iam.RolePolicyAttachment(
+            f"{name}-ssm-policy",
+            role=self.role.id,
+            policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+            opts=pulumi.ResourceOptions(parent=self)
+        )
+        
         # Attach additional managed policies if provided
         if config.additional_policies:
             for i, policy_arn in enumerate(config.additional_policies):

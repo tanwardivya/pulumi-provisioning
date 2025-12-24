@@ -218,37 +218,55 @@ jobs:
           echo "Waiting for EC2 instance to be ready for SSM: $EC2_INSTANCE_ID"
           echo "This may take 1-2 minutes for new instances..."
           
-          MAX_ATTEMPTS=30
+          MAX_ATTEMPTS=36
           ATTEMPT=0
           SSM_READY=false
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
             
-            # Check if instance is ready for SSM by trying to describe it
-            if aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
-              --region "$AWS_REGION" \
-              --query 'InstanceInformationList[0].PingStatus' \
-              --output text 2>/dev/null | grep -q "Online"; then
-              echo "✅ SSM is ready (attempt $ATTEMPT/$MAX_ATTEMPTS)"
-              SSM_READY=true
-              break
-            fi
-            
-            # Also check instance state
+            # Check instance state first
             INSTANCE_STATE=$(aws ec2 describe-instances \
               --instance-ids "$EC2_INSTANCE_ID" \
               --region "$AWS_REGION" \
               --query 'Reservations[0].Instances[0].State.Name' \
               --output text 2>/dev/null || echo "unknown")
             
-            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Instance state: $INSTANCE_STATE, SSM: checking..."
+            # Check SSM ping status
+            PING_STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "not-found")
+            
+            # Try a simple test command to verify SSM is actually ready
+            if [ "$PING_STATUS" = "Online" ]; then
+              # Try sending a simple test command to verify SSM is actually functional
+              TEST_COMMAND_ID=$(aws ssm send-command \
+                --instance-ids "$EC2_INSTANCE_ID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters '{"commands":["echo test"]}' \
+                --region "$AWS_REGION" \
+                --query 'Command.CommandId' \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -n "$TEST_COMMAND_ID" ]; then
+                echo "✅ SSM is ready and functional (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+                SSM_READY=true
+                # Cancel the test command (we don't need to wait for it)
+                aws ssm cancel-command --command-id "$TEST_COMMAND_ID" --region "$AWS_REGION" 2>/dev/null || true
+                break
+              fi
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Instance: $INSTANCE_STATE, SSM Ping: $PING_STATUS"
             sleep 5
           done
           
           if [ "$SSM_READY" = false ]; then
-            echo "⚠️  SSM not ready after $MAX_ATTEMPTS attempts (2.5 minutes)"
+            echo "⚠️  SSM not ready after $MAX_ATTEMPTS attempts (3 minutes)"
+            echo "   Instance state: $INSTANCE_STATE"
+            echo "   SSM ping status: $PING_STATUS"
             echo "   Instance may still be initializing. Deployment will be skipped."
             echo "   The image is in ECR and will be pulled on next deployment or instance restart."
             exit 0
