@@ -177,10 +177,6 @@ jobs:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
       - name: Get Current Deployed Image Tag from SSM
         id: current-image
         env:
@@ -201,12 +197,67 @@ jobs:
             echo "ℹ️  No current image tag found in SSM (first deployment or SSM not set)"
           fi
 
-      - name: Build Docker Image
-        id: build-image
+      - name: Check if Docker-relevant files changed
+        id: check-docker-files
+        run: |
+          # Check if files that affect Docker build have changed
+          # Only app/ folder, Dockerfile, and .dockerignore affect the image
+          CURRENT_TAG="${{ steps.current-image.outputs.current_image_tag }}"
+
+          if [ -z "$CURRENT_TAG" ] || [ "$CURRENT_TAG" = "None" ] || [ "$CURRENT_TAG" = "null" ] || [ "$CURRENT_TAG" = "" ]; then
+            echo "docker_files_changed=true" >> $GITHUB_OUTPUT
+            echo "ℹ️  No previous deployment found, will build image"
+            exit 0
+          fi
+
+          # Get the commit SHA of the current deployed image tag
+          # The image tag is the commit SHA, so we can use it to compare
+          PREVIOUS_SHA="$CURRENT_TAG"
+          CURRENT_SHA="${{ github.sha }}"
+
+          if [ "$PREVIOUS_SHA" = "$CURRENT_SHA" ]; then
+            echo "docker_files_changed=false" >> $GITHUB_OUTPUT
+            echo "✅ Same commit SHA - no changes to check"
+            exit 0
+          fi
+
+          # Check if Docker-relevant files changed between commits
+          # Files that affect Docker build: app/, Dockerfile, .dockerignore
+          CHANGED_FILES=$(git diff --name-only "$PREVIOUS_SHA" "$CURRENT_SHA" 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "docker_files_changed=false" >> $GITHUB_OUTPUT
+            echo "✅ No files changed between commits"
+            exit 0
+          fi
+
+          # Check if any Docker-relevant files changed
+          DOCKER_RELEVANT_CHANGED=$(echo "$CHANGED_FILES" | grep -E "^(app/|Dockerfile|\.dockerignore)" || echo "")
+
+          if [ -z "$DOCKER_RELEVANT_CHANGED" ]; then
+            echo "docker_files_changed=false" >> $GITHUB_OUTPUT
+            echo "✅ No Docker-relevant files changed (app/, Dockerfile, .dockerignore)"
+            echo "Changed files:"
+            echo "$CHANGED_FILES" | head -10
+          else
+            echo "docker_files_changed=true" >> $GITHUB_OUTPUT
+            echo "📝 Docker-relevant files changed:"
+            echo "$DOCKER_RELEVANT_CHANGED"
+          fi
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        if: steps.check-docker-files.outputs.docker_files_changed == 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Image (if Docker files changed)
+        id: build-push-image
+        if: steps.check-docker-files.outputs.docker_files_changed == 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
           IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+          AWS_REGION: ${{ env.AWS_REGION }}
         run: |
           echo "Building Docker image with tag: $IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
@@ -215,80 +266,27 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:prod
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-      - name: Push Image to ECR
-        id: push-image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
-          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-        run: |
           echo "Pushing image with tag: $IMAGE_TAG"
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:prod
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-          # Get image digest from ECR after push
-          NEW_IMAGE_DIGEST=$(aws ecr describe-images \
-            --repository-name "$ECR_REPOSITORY" \
-            --image-ids imageTag=$IMAGE_TAG \
-            --region "$AWS_REGION" \
-            --query 'imageDetails[0].imageDigest' \
-            --output text 2>/dev/null || echo "")
+          echo "✅ Image built and pushed successfully with tag: $IMAGE_TAG"
 
-          echo "new_image_digest=$NEW_IMAGE_DIGEST" >> $GITHUB_OUTPUT
-          echo "✅ Image pushed successfully with tag: $IMAGE_TAG"
-          echo "New image digest: $NEW_IMAGE_DIGEST"
-
-      - name: Check if Image Changed (Compare Digests)
+      - name: Determine if Deployment is Needed
         id: check-changes
-        env:
-          ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
-          CURRENT_TAG: ${{ steps.current-image.outputs.current_image_tag }}
-          NEW_TAG: ${{ steps.outputs.outputs.image_tag }}
-          NEW_DIGEST: ${{ steps.push-image.outputs.new_image_digest }}
-          AWS_REGION: ${{ env.AWS_REGION }}
         run: |
-          DEPLOY_NEEDED="true"
-
-          # If we have a current tag, compare image digests from ECR
-          if [ -n "$CURRENT_TAG" ] && [ "$CURRENT_TAG" != "None" ] && [ "$CURRENT_TAG" != "" ] && [ "$CURRENT_TAG" != "null" ]; then
-            echo "Comparing new image ($NEW_TAG) with currently deployed image ($CURRENT_TAG)..."
-            
-            # Get digest of currently deployed image from ECR
-            CURRENT_DIGEST=$(aws ecr describe-images \
-              --repository-name "$ECR_REPOSITORY" \
-              --image-ids imageTag=$CURRENT_TAG \
-              --region "$AWS_REGION" \
-              --query 'imageDetails[0].imageDigest' \
-              --output text 2>/dev/null || echo "")
-            
-            if [ -n "$CURRENT_DIGEST" ] && [ -n "$NEW_DIGEST" ] && [ "$CURRENT_DIGEST" = "$NEW_DIGEST" ]; then
-              echo "✅ Image digests match - no code changes detected"
-              echo "Current digest: $CURRENT_DIGEST"
-              echo "New digest: $NEW_DIGEST"
-              DEPLOY_NEEDED="false"
-            elif [ -z "$CURRENT_DIGEST" ]; then
-              echo "ℹ️  Current image tag not found in ECR, deployment needed"
-              DEPLOY_NEEDED="true"
-            else
-              echo "📝 Image digests differ - code changes detected"
-              echo "Current digest: $CURRENT_DIGEST"
-              echo "New digest: $NEW_DIGEST"
-              DEPLOY_NEEDED="true"
-            fi
-          else
-            echo "ℹ️  No current image tag in SSM, deployment needed (first deployment)"
-            DEPLOY_NEEDED="true"
+          # If Docker files didn't change, we can skip everything without building
+          if [ "${{ steps.check-docker-files.outputs.docker_files_changed }}" = "false" ]; then
+            echo "✅ No Docker-relevant files changed - skipping build, push, and deployment"
+            echo "deploy_needed=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-          echo "deploy_needed=$DEPLOY_NEEDED" >> $GITHUB_OUTPUT
-          if [ "$DEPLOY_NEEDED" = "false" ]; then
-            echo "⏭️  Skipping EC2 deployment - no code changes detected"
-            echo "   Image is already in ECR and matches currently deployed version"
-          else
-            echo "🚀 Proceeding with EC2 deployment - code changes detected"
-          fi
+          # If we got here, Docker files changed, so we need to deploy
+          # (The image was already built and pushed in the previous step)
+          echo "🚀 Docker-relevant files changed - deployment needed"
+          echo "deploy_needed=true" >> $GITHUB_OUTPUT
 
       - name: Store Image Tag in SSM Parameter Store (if changed)
         if: steps.check-changes.outputs.deploy_needed == 'true'
