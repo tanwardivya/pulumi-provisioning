@@ -84,6 +84,9 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
       - name: Install Pulumi dependencies
         working-directory: infrastructure
         run: |
@@ -210,9 +213,6 @@ jobs:
             --region "$AWS_REGION"
 
           echo "✅ Image tag stored in SSM: /pulumi/prod/image_tag = $IMAGE_TAG"
-
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
 
       - name: Wait for EC2 SSM to be Ready
         run: |
