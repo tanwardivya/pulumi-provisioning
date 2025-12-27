@@ -1,10 +1,10 @@
 name: Deploy to Test Environment
 
 on:
-  # Deploy only after PR is merged (not on every push)
-  # This ensures code is reviewed before deployment
+  # Preview runs on PR open/update (opened, synchronize, reopened)
+  # Deploy runs only on PR merge (closed + merged)
   pull_request:
-    types: [closed]
+    types: [opened, synchronize, reopened, closed]
     branches:
       - develop
       - test
@@ -23,13 +23,15 @@ jobs:
     # - Allows reviewers to see infrastructure impact
     # - Can be used as a required status check for branch protection
     #
-    # This job is skipped on push events because:
-    # - Preview already ran on the PR (if applicable)
-    # - We directly deploy to test environment on push
-    # - Pulumi up includes preview internally
-    if: github.event_name == 'pull_request'
+    # This job runs when:
+    # 1. PR is opened (opened)
+    # 2. PR is updated with new commits (synchronize)
+    # 3. PR is reopened (reopened)
+    # It does NOT run when PR is closed (merged) - deploy job handles that
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed'
     runs-on: ubuntu-latest
-
     # Concurrency Control: Multiple previews can run simultaneously
     # This is safe because preview is read-only and doesn't modify AWS state
     # Each PR gets its own preview based on PR number
