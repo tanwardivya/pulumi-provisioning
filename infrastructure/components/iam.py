@@ -157,6 +157,25 @@ class IAMComponent(BaseComponent):
                 policy=policy_json,
                 opts=pulumi.ResourceOptions(parent=self)
             )
+        else:
+            self.policy = None
+        
+        # Attach ECR read-only managed policy (for pulling Docker images)
+        if ecr_arn:
+            aws.iam.RolePolicyAttachment(
+                f"{name}-ecr-policy",
+                role=self.role.id,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+                opts=pulumi.ResourceOptions(parent=self)
+            )
+        
+        # Attach SSM managed instance core policy (required for SSM agent to register)
+        aws.iam.RolePolicyAttachment(
+            f"{name}-ssm-policy",
+            role=self.role.id,
+            policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+            opts=pulumi.ResourceOptions(parent=self)
+        )
         
         # Attach additional managed policies if provided
         if config.additional_policies:
