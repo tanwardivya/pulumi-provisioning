@@ -97,7 +97,9 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          # Use separate production role (limited permissions)
+          # If AWS_PROD_ROLE_ARN is not set, fall back to AWS_ROLE_ARN
+          role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Pulumi
