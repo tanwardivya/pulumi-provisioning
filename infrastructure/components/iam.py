@@ -17,11 +17,12 @@ class IAMComponent(BaseComponent):
         ecr_arn = ecr_repository_arn or config.ecr_repository_arn
         
         # Collect all ARN outputs to resolve them together
+        # Note: RDS IAM authentication is skipped (requires special ARN format conversion)
         arn_outputs = []
         if s3_arns:
             arn_outputs.extend(s3_arns)
-        if rds_arn:
-            arn_outputs.append(rds_arn)
+        # RDS ARN not included - RDS IAM auth requires special ARN format (rds-db:connect)
+        # Connection will use username/password instead
         if ecr_arn:
             arn_outputs.append(ecr_arn)
         
@@ -32,17 +33,18 @@ class IAMComponent(BaseComponent):
             arn_index = 0
             
             # S3 access policy
-            if s3_arns:
+            if s3_arns and len(s3_arns) > 0:
                 s3_resources = []
                 for _ in s3_arns:
-                    if arn_index >= len(resolved_arns):
-                        break  # Safety check to prevent IndexError
-                    bucket_arn = resolved_arns[arn_index]
-                    s3_resources.append(bucket_arn)
-                    s3_resources.append(f"{bucket_arn}/*")
-                    arn_index += 1
+                    if arn_index < len(resolved_arns):
+                        bucket_arn = resolved_arns[arn_index]
+                        # Validate ARN is not None/empty and is a string
+                        if bucket_arn and isinstance(bucket_arn, str) and bucket_arn.strip():
+                            s3_resources.append(bucket_arn.strip())
+                            s3_resources.append(f"{bucket_arn.strip()}/*")
+                        arn_index += 1
                 
-                if s3_resources:
+                if s3_resources:  # Only add statement if we have resources
                     policy_statements.append({
                         "Effect": "Allow",
                         "Action": [
@@ -55,60 +57,38 @@ class IAMComponent(BaseComponent):
                     })
             
             # RDS access policy (for connection, not direct RDS management)
-            # For rds-db:connect, we need: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-user-name
-            # The passed ARN is: arn:aws:rds:region:account-id:db:instance-id
-            # We need to convert it to rds-db format
-            if rds_arn:
-                if arn_index >= len(resolved_arns):
-                    # Safety check: if index is out of range, skip RDS policy
-                    pass
-                else:
-                    instance_arn = resolved_arns[arn_index]
-                    # Convert RDS instance ARN to rds-db:connect ARN format
-                    # Format: arn:aws:rds:region:account-id:db:instance-id -> arn:aws:rds-db:region:account-id:dbuser:instance-id/username
-                    arn_parts = instance_arn.split(":")
-                    if len(arn_parts) >= 7 and arn_parts[2] == "rds":
-                        region = arn_parts[3]
-                        account_id = arn_parts[4]
-                        instance_id = arn_parts[6]  # Instance ID is after 'db:'
-                        # Use default username 'dbadmin' (can be made configurable if needed)
-                        username = "dbadmin"
-                        rds_db_arn = f"arn:aws:rds-db:{region}:{account_id}:dbuser:{instance_id}/{username}"
-                    else:
-                        # Fallback: use wildcard if ARN format is unexpected
-                        rds_db_arn = "arn:aws:rds-db:*:*:dbuser:*/dbadmin"
-                    
-                    policy_statements.append({
-                        "Effect": "Allow",
-                        "Action": [
-                            "rds-db:connect",
-                        ],
-                        "Resource": rds_db_arn,
-                    })
-                    arn_index += 1
+            # Note: rds-db:connect requires special ARN format: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-username
+            # For now, we'll skip RDS IAM authentication and use username/password instead
+            # If needed, this can be added later with proper ARN conversion
+            # RDS connection uses username/password authentication (configured in user_data script)
             
             # ECR access policy (for pulling images)
+            # ECR ARN should be at index = len(s3_arns) since we skipped RDS
             if ecr_arn:
-                ecr_resource = resolved_arns[arn_index]
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "ecr:GetAuthorizationToken",
-                        "ecr:BatchCheckLayerAvailability",
-                        "ecr:GetDownloadUrlForLayer",
-                        "ecr:BatchGetImage",
-                    ],
-                    "Resource": "*",
-                })
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "ecr:DescribeRepositories",
-                        "ecr:DescribeImages",
-                    ],
-                    "Resource": ecr_resource,
-                })
-                arn_index += 1
+                ecr_index = len(s3_arns) if s3_arns else 0
+                if ecr_index < len(resolved_arns):
+                    ecr_resource = resolved_arns[ecr_index]
+                    # Validate ARN is not None/empty and is a string
+                    if ecr_resource and isinstance(ecr_resource, str) and ecr_resource.strip():
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:GetAuthorizationToken",
+                            ],
+                            "Resource": ["*"],
+                        })
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:BatchCheckLayerAvailability",
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:BatchGetImage",
+                                "ecr:DescribeRepositories",
+                                "ecr:DescribeImages",
+                                "ecr:ListImages",
+                            ],
+                            "Resource": [ecr_resource.strip()],
+                        })
             
             # SSM access policy (for Systems Manager to manage EC2 instance)
             # Required for SSM send-command to work
