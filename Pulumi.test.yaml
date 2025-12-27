@@ -1,0 +1,9 @@
+config:
+  aws:region: us-east-1
+  pulumi-provisioning:dbName: pulumi_test_db
+  pulumi-provisioning:dbPassword:
+    secure: AAABAK7Iz8RdrTJY85bwl8z8vZ3nfVJFXBBMhv44NxqAuQIwZiJoZ1dQzrp8wnA=
+  pulumi-provisioning:ecrRepositoryName: pulumi-provisioning-test
+  pulumi-provisioning:environment: test
+  pulumi-provisioning:projectName: pulumi-provisioning-test
+  pulumi-provisioning:s3BucketName: pulumi-provisioning-test-bucket

@@ -1,0 +1,44 @@
+# Pulumi Stack Configuration Template
+# Copy this to Pulumi.test.yaml or Pulumi.prod.yaml and fill in values
+# Or use: pulumi config set <key> <value> to set these programmatically
+
+config:
+  # AWS Configuration
+  aws:region: us-east-1
+  
+  # Environment
+  environment: test  # or 'prod'
+  projectName: pulumi-provisioning-test  # or 'pulumi-provisioning-prod'
+  
+  # S3 Configuration
+  s3BucketName: pulumi-provisioning-test-bucket
+  s3Versioning: true
+  s3Encryption: true
+  
+  # RDS Configuration
+  dbName: pulumi_test_db
+  dbEngine: postgres
+  dbInstanceClass: db.t3.micro
+  dbAllocatedStorage: 20
+  dbMultiAz: false
+  # dbPassword: <set via: pulumi config set --secret dbPassword <password>>
+  
+  # EC2 Configuration
+  ec2InstanceType: t3.micro
+  ec2AmiId: ""  # Leave empty to use latest Amazon Linux 2
+  
+  # ECR Configuration
+  ecrRepositoryName: pulumi-provisioning-test
+  ecrImageScanning: true
+  ecrLifecyclePolicy: true
+  ecrMaxImageCount: 10
+  
+  # Optional: Domain Configuration
+  # domainName: yourdomain.com
+  
+  # Networking (optional - defaults provided)
+  # vpcCidr: 10.0.0.0/16
+  # enableNatGateway: true
+
+
+

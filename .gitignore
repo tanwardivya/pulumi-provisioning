@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# uv
+.venv/
+uv.lock
+
+# Pulumi
+.pulumi/
+*.pyc
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment variables
+.env
+.env.local
+
+# AWS credentials (never commit!)
+*.pem
+*.key
+*_accessKeys.csv
+credentials
+setup-aws.sh
+# Allow example file
+!setup-aws.example.sh
+
+# Logs
+*.log
+logs/
+
+# Docker
+.dockerignore
+
+# Legacy requirements files (use pyproject.toml instead)
+# requirements.txt - removed, use pyproject.toml
+
+# Temporary files
+*.tmp
+*.bak
+
+# Pulumi verification scripts output
+*.preview.json
+
