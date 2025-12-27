@@ -1,5 +1,6 @@
 """Main Pulumi program - orchestrates all infrastructure components."""
 import pulumi
+import pulumi_aws as aws
 from infrastructure.components.networking import NetworkingComponent
 from infrastructure.components.s3 import S3BucketComponent
 from infrastructure.components.rds import RDSComponent
@@ -49,6 +50,21 @@ iam = IAMComponent(
     s3_bucket_arns=[s3.bucket_arn],
     rds_instance_arn=rds.db_instance.arn,  # Direct Output, no need for apply
     ecr_repository_arn=ecr.repository_arn
+)
+
+# Store database password in SSM Parameter Store for EC2 instance to retrieve
+# This allows the user_data script to get the password securely
+db_password = pulumi.Config().require_secret("dbPassword")
+ssm_db_password = aws.ssm.Parameter(
+    f"{stack}-db-password",
+    name=f"/pulumi/{stack}/db_password",
+    type="SecureString",
+    value=db_password,
+    description=f"Database password for {stack} environment",
+    tags=config["tags"],
+    opts=pulumi.ResourceOptions(
+        additional_secret_outputs=["value"]  # Mark value as secret
+    )
 )
 
 # User data script for EC2 (install Docker, Nginx, pull from ECR, etc.)
@@ -266,13 +282,15 @@ date
 )
 
 # Create EC2 instance
+# Ensure SSM parameter exists before EC2 instance (so user_data can retrieve password)
 ec2 = EC2Component(
     f"{stack}-server",
     config["ec2"],
     subnet_id=networking.public_subnets[0].id,
     security_group_id=networking.ec2_security_group.id,
     iam_instance_profile_name=iam.instance_profile_name,
-    user_data=user_data
+    user_data=user_data,
+    opts=pulumi.ResourceOptions(depends_on=[ssm_db_password])
 )
 
 # Optional: Route53 and ACM (if domain configured)

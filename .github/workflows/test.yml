@@ -1,13 +1,14 @@
 name: Deploy to Test Environment
 
 on:
-  push:
+  # Deploy only after PR is merged (not on every push)
+  # This ensures code is reviewed before deployment
+  pull_request:
+    types: [closed]
     branches:
       - develop
       - test
-  pull_request:
-    branches:
-      - develop
+  # Manual trigger for direct deployments (use with caution)
   workflow_dispatch:
 
 env:
@@ -97,20 +98,23 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
   deploy:
-    # Industry Best Practice: Deploy only after merge
+    # Industry Best Practice: Deploy only after PR merge
     # - Never deploy infrastructure from PRs (security risk from untrusted code)
-    # - Deploy only after PR is merged and code is in target branch
+    # - Deploy only after PR is merged (code is reviewed)
     # - Preview already validated changes on the PR
     #
-    # This job runs on push to develop/test branches (after PR merge)
+    # This job runs when:
+    # 1. PR is closed AND merged (normal flow - code reviewed)
+    # 2. Manual dispatch (workflow_dispatch) - for emergency deployments
+    #
     # Preview is skipped here because:
     # 1. Preview already ran on the PR (if applicable)
     # 2. Test environment is safe to deploy directly
     # 3. Pulumi up includes a preview step internally
-    # For manual runs (workflow_dispatch), you can review before confirming
-    if: github.event_name == 'push'
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-
     # Concurrency Control: Prevent multiple simultaneous deployments
     # This ensures only ONE deployment runs at a time to prevent AWS state conflicts
     # If a new deployment starts while one is running:
@@ -125,6 +129,9 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        # For pull_request events, checkout the merge commit (not the PR branch)
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Deployment Status
         run: |
@@ -543,9 +550,11 @@ jobs:
   integration-tests:
     # Integration tests run after successful deployment to test environment
     # Tests the FastAPI service endpoints to ensure everything works
-    # Only runs on push events (after merge), not on PRs
+    # Only runs after PR merge (when deploy job runs), not on PR previews
     # If tests pass, this workflow will trigger production deployment
-    if: github.event_name == 'push'
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      github.event_name == 'workflow_dispatch'
     needs: deploy
     runs-on: ubuntu-latest
     permissions:
@@ -555,6 +564,9 @@ jobs:
       # GitHub automatically triggers prod workflow when this workflow succeeds
     steps:
       - uses: actions/checkout@v4
+        # For pull_request events, checkout the merge commit (not the PR branch)
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3

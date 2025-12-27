@@ -1,8 +1,9 @@
 name: Deploy to Production Environment
 
 on:
-  # Triggered automatically when test workflow completes successfully
+  # PRIMARY: Triggered automatically when test workflow completes successfully
   # This ensures: test deploy → integration tests → production deploy
+  # Only triggers if integration tests pass
   workflow_run:
     workflows: ["Deploy to Test Environment"]
     types:
@@ -10,15 +11,12 @@ on:
     branches:
       - develop
       - test
-  # Manual trigger (for emergency deployments or direct to prod)
+  # Manual trigger (for emergency deployments or bypassing test)
+  # Use with caution - should normally go through test → integration tests → prod
   workflow_dispatch:
-  # Push to main/master (for direct production deployments)
-  push:
-    branches:
-      - main
-      - master
-  release:
-    types: [published]
+  # NOTE: Push and release triggers REMOVED to enforce proper flow:
+  # All production deployments must go through: test → integration tests → production
+  # If you need direct prod deployment, use workflow_dispatch instead
 
 env:
   AWS_REGION: us-east-1
@@ -29,12 +27,11 @@ jobs:
     runs-on: ubuntu-latest
 
     # Only run if:
-    # 1. Manual trigger (workflow_dispatch), OR
-    # 2. Push to main/master, OR
-    # 3. Test workflow completed successfully (workflow_run)
+    # 1. Manual trigger (workflow_dispatch) - for emergencies, OR
+    # 2. Test workflow completed successfully (workflow_run) - normal flow
+    # Push triggers removed to enforce: test → integration tests → production
     if: |
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'push' ||
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
 
     # Concurrency Control: Prevent multiple simultaneous deployments
@@ -74,9 +71,7 @@ jobs:
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "Trigger: Manual dispatch"
             echo "⚠️  Manual deployment - ensure tests have passed!"
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            echo "Trigger: Push to ${{ github.ref_name }}"
-            echo "Commit: ${{ github.sha }}"
+            echo "⚠️  Normal flow: test → integration tests → production"
           fi
           echo "=========================================="
 
