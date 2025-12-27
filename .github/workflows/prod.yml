@@ -18,7 +18,9 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: production
-      url: https://${{ secrets.DOMAIN_NAME || 'yourdomain.com' }}
+      # URL must be set in GitHub environment settings (Settings → Environments → production)
+      # The environment.url field does not support dynamic expressions
+      # url: https://yourdomain.com
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +32,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Pulumi dependencies
         working-directory: infrastructure
@@ -136,4 +138,3 @@ jobs:
             sleep 30
             curl -f http://$EC2_IP/health || curl -f https://$EC2_IP/health || exit 1
           fi
-
