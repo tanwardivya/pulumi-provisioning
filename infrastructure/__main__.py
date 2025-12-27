@@ -269,6 +269,54 @@ else
     fi
 fi
 
+# Create check-image-version script for manual verification
+echo "Creating check-image-version script..."
+cat > /usr/local/bin/check-image-version.sh << 'CHECK_EOF'
+#!/bin/bash
+# Script to check the current FastAPI container image version
+# Usage: sudo /usr/local/bin/check-image-version.sh
+
+echo "=========================================="
+echo "FastAPI Container Image Information"
+echo "=========================================="
+
+if docker ps | grep -q fastapi-app; then
+    echo "✅ Container Status: Running"
+    echo ""
+    echo "Container Details:"
+    docker ps --filter name=fastapi-app --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
+    echo ""
+    echo "Image Information:"
+    CONTAINER_IMAGE=$(docker ps --filter name=fastapi-app --format "{{.Image}}")
+    if [ -n "$CONTAINER_IMAGE" ]; then
+        docker inspect fastapi-app --format "Image: {{.Config.Image}}" 2>/dev/null || echo "Image: $CONTAINER_IMAGE"
+        echo ""
+        echo "Environment Variables:"
+        docker inspect fastapi-app --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E "(IMAGE_TAG|IMAGE_URI|AWS_REGION|S3_BUCKET|DB_)" | sed 's/^/  /'
+    fi
+    echo ""
+    echo "Recent Container Logs (last 10 lines):"
+    docker logs fastapi-app --tail 10 2>/dev/null | sed 's/^/  /'
+else
+    echo "❌ Container Status: Not Running"
+    echo ""
+    echo "Checking if container exists but is stopped:"
+    if docker ps -a | grep -q fastapi-app; then
+        docker ps -a --filter name=fastapi-app --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
+        echo ""
+        echo "Last Container Logs:"
+        docker logs fastapi-app --tail 20 2>/dev/null | sed 's/^/  /'
+    else
+        echo "  No container named 'fastapi-app' found"
+    fi
+fi
+
+echo ""
+echo "=========================================="
+CHECK_EOF
+chmod +x /usr/local/bin/check-image-version.sh
+echo "✅ check-image-version.sh script created"
+
 echo "=== User data script completed ==="
 echo "Container updates are handled automatically by CI/CD pipeline via SSM"
 date

@@ -45,6 +45,7 @@ def get_config():
         engine=config.get("dbEngine") or "postgres",
         instance_class=config.get("dbInstanceClass") or "db.t3.micro",
         allocated_storage=config.get_int("dbAllocatedStorage") or 20,
+        username=config.get("dbUsername"),  # Optional - defaults to "dbadmin" in component
         multi_az=config.get_bool("dbMultiAz") if config.get("dbMultiAz") else False,
         tags=base_tags,
     )
