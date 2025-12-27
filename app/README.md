@@ -98,5 +98,8 @@ See `pyproject.toml` for complete dependency list. Main dependencies:
 - `psycopg2-binary`: PostgreSQL driver
 - `pydantic`: Data validation
 
+<<<<<<< HEAD
+=======
 
 
+>>>>>>> origin/main
