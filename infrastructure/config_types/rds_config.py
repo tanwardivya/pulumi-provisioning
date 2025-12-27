@@ -14,7 +14,7 @@ class RDSConfig:
     storage_type: str = "gp3"
     username: Optional[str] = None  # Defaults to "dbadmin" in component (admin is reserved in PostgreSQL)
     multi_az: bool = False
-    backup_retention_period: int = 7
-    skip_final_snapshot: bool = False
+    backup_retention_period: int = 0  # 0 for free tier compatibility (max 1 day for free tier)
+    skip_final_snapshot: bool = True  # True for free tier
     tags: Optional[dict] = None
 

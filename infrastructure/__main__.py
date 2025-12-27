@@ -164,22 +164,27 @@ server {{
 }}
 NGINX_EOF
 
-# Test Nginx configuration
-nginx -t && systemctl restart nginx && systemctl enable nginx || echo "Nginx configuration failed"
+# Test nginx configuration
+nginx -t || echo "Nginx config test failed, but continuing..."
+
+# Start and enable Nginx
+systemctl start nginx || true
+systemctl enable nginx
 
 # Get AWS region from instance metadata
 AWS_REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region)
+echo "AWS Region: $AWS_REGION"
 
-# Login to ECR with retries
-echo "Logging in to ECR..."
+# Login to ECR (retry up to 3 times)
+echo "Logging into ECR..."
 ECR_LOGIN_SUCCESS=false
-for attempt in 1 2 3; do
-    if aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin {args[0]} 2>/dev/null; then
-        echo "ECR login successful (attempt $attempt)"
+for i in $(seq 1 3); do
+    if aws ecr get-login-password --region $AWS_REGION 2>/dev/null | docker login --username AWS --password-stdin {args[0]} 2>/dev/null; then
+        echo "ECR login successful"
         ECR_LOGIN_SUCCESS=true
         break
     fi
-    echo "ECR login failed (attempt $attempt/3), retrying..."
+    echo "ECR login attempt $i failed, retrying..."
     sleep 5
 done
 
@@ -204,10 +209,11 @@ docker rm fastapi-app 2>/dev/null || true
 echo "Getting image tag from SSM Parameter Store..."
 SPECIFIC_TAG=$(aws ssm get-parameter --name /pulumi/{stack_name}/image_tag --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo "")
 
-# Pull image with retries and fallback tags
+# Pull image from ECR (try specific tag first, then fallback)
+echo "Pulling Docker image from ECR..."
 IMAGE_PULLED=false
-MAX_RETRIES=3
-RETRY_DELAY=10
+MAX_RETRIES=10
+RETRY_DELAY=30
 
 for attempt in $(seq 1 $MAX_RETRIES); do
     echo "Attempt $attempt/$MAX_RETRIES to pull image..."
@@ -271,54 +277,6 @@ else
         docker logs fastapi-app || true
     fi
 fi
-
-# Create check-image-version script for manual verification
-echo "Creating check-image-version script..."
-cat > /usr/local/bin/check-image-version.sh << 'CHECK_EOF'
-#!/bin/bash
-# Script to check the current FastAPI container image version
-# Usage: sudo /usr/local/bin/check-image-version.sh
-
-echo "=========================================="
-echo "FastAPI Container Image Information"
-echo "=========================================="
-
-if docker ps | grep -q fastapi-app; then
-    echo "✅ Container Status: Running"
-    echo ""
-    echo "Container Details:"
-    docker ps --filter name=fastapi-app --format "table {{.Names}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}"
-    echo ""
-    echo "Image Information:"
-    CONTAINER_IMAGE=$(docker ps --filter name=fastapi-app --format "{{.Image}}")
-    if [ -n "$CONTAINER_IMAGE" ]; then
-        docker inspect fastapi-app --format "Image: {{.Config.Image}}" 2>/dev/null || echo "Image: $CONTAINER_IMAGE"
-        echo ""
-        echo "Environment Variables:"
-        docker inspect fastapi-app --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E "(IMAGE_TAG|IMAGE_URI|AWS_REGION|S3_BUCKET|DB_)" | sed 's/^/  /'
-    fi
-    echo ""
-    echo "Recent Container Logs (last 10 lines):"
-    docker logs fastapi-app --tail 10 2>/dev/null | sed 's/^/  /'
-else
-    echo "❌ Container Status: Not Running"
-    echo ""
-    echo "Checking if container exists but is stopped:"
-    if docker ps -a | grep -q fastapi-app; then
-        docker ps -a --filter name=fastapi-app --format "table {{.Names}}\t{{.Image}}\t{{.Status}}"
-        echo ""
-        echo "Last Container Logs:"
-        docker logs fastapi-app --tail 20 2>/dev/null | sed 's/^/  /'
-    else
-        echo "  No container named 'fastapi-app' found"
-    fi
-fi
-
-echo ""
-echo "=========================================="
-CHECK_EOF
-chmod +x /usr/local/bin/check-image-version.sh
-echo "✅ check-image-version.sh script created"
 
 echo "=== User data script completed ==="
 echo "Container updates are handled automatically by CI/CD pipeline via SSM"
