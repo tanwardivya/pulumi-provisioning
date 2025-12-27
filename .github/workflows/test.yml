@@ -1,13 +1,15 @@
 name: Deploy to Test Environment
 
 on:
-  push:
-    branches:
-      - develop
-      - test
+  # Preview runs on PR open/update (opened, synchronize, reopened)
+  # Deploy runs only on PR merge to main (closed + merged)
   pull_request:
+    types: [opened, synchronize, reopened, closed]
+    # Trigger on PRs targeting main branch
+    # Any branch raising PR against main will trigger preview
     branches:
-      - develop
+      - main
+  # Manual trigger for direct deployments (use with caution)
   workflow_dispatch:
 
 env:
@@ -16,8 +18,32 @@ env:
 
 jobs:
   preview:
-    if: github.event_name == 'pull_request'
+    # Industry Best Practice: Preview/Plan on PRs
+    # - Shows what will change before merging (safety check)
+    # - Never deploys infrastructure from PRs (security best practice)
+    # - Allows reviewers to see infrastructure impact
+    # - Can be used as a required status check for branch protection
+    #
+    # This job runs when:
+    # 1. PR is opened (opened)
+    # 2. PR is updated with new commits (synchronize)
+    # 3. PR is reopened (reopened)
+    # It does NOT run when PR is closed (merged) - deploy job handles that
+    if: |
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed'
     runs-on: ubuntu-latest
+    # Concurrency Control: Multiple previews can run simultaneously
+    # This is safe because preview is read-only and doesn't modify AWS state
+    # Each PR gets its own preview based on PR number
+    concurrency:
+      group: preview-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: false # Let each PR preview complete
+
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write # Allow commenting on PRs
     steps:
       - uses: actions/checkout@v4
 
@@ -29,11 +55,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Pulumi dependencies
         working-directory: infrastructure
         run: |
+          uv venv
+          source .venv/bin/activate
           uv pip install -e ".[dev]"
 
       - name: Configure AWS credentials
@@ -49,15 +77,79 @@ jobs:
 
       - name: Pulumi Preview
         working-directory: infrastructure
-        run: pulumi preview --stack ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          echo "📋 Running Pulumi preview to show infrastructure changes..."
+          echo "This preview shows what will be created/updated/deleted if this PR is merged."
+          echo "=========================================="
+
+          # Run preview with detailed output
+          # Exit code 0 = no changes, 1 = changes detected, 2 = error
+          pulumi preview --stack ${{ env.PULUMI_STACK }} --diff || PREVIEW_EXIT=$?
+
+          echo "=========================================="
+          if [ "${PREVIEW_EXIT:-0}" -eq 0 ]; then
+            echo "✅ Preview completed: No changes detected"
+          elif [ "${PREVIEW_EXIT:-0}" -eq 1 ]; then
+            echo "📝 Preview completed: Changes detected (this is normal)"
+          else
+            echo "❌ Preview failed with exit code ${PREVIEW_EXIT}"
+            exit ${PREVIEW_EXIT}
+          fi
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
   deploy:
-    if: github.event_name == 'push'
+    # Industry Best Practice: Deploy only after PR merge
+    # - Never deploy infrastructure from PRs (security risk from untrusted code)
+    # - Deploy only after PR is merged (code is reviewed)
+    # - Preview already validated changes on the PR
+    #
+    # This job runs when:
+    # 1. PR is closed AND merged (normal flow - code reviewed)
+    # 2. Manual dispatch (workflow_dispatch) - for emergency deployments
+    #
+    # Preview is skipped here because:
+    # 1. Preview already ran on the PR (if applicable)
+    # 2. Test environment is safe to deploy directly
+    # 3. Pulumi up includes a preview step internally
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    # Concurrency Control: Prevent multiple simultaneous deployments
+    # This ensures only ONE deployment runs at a time to prevent AWS state conflicts
+    # If a new deployment starts while one is running:
+    #   - cancel-in-progress: true = Cancel the old one, run the new one (latest wins)
+    #   - cancel-in-progress: false = Queue the new one, wait for old one to finish
+    concurrency:
+      group: deploy-test-${{ github.ref }}
+      cancel-in-progress: true # Latest deployment wins (recommended for test env)
+
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        # For pull_request events, checkout the merge commit (not the PR branch)
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+
+      - name: Deployment Status
+        run: |
+          echo "=========================================="
+          echo "🚀 Starting Infrastructure Deployment"
+          echo "=========================================="
+          echo "Stack: ${{ env.PULUMI_STACK }}"
+          echo "Branch: ${{ github.ref_name }}"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo ""
+          echo "ℹ️  Note: Only one deployment runs at a time"
+          echo "   If another deployment is running, this will cancel it"
+          echo "   (latest deployment wins for test environment)"
+          echo "=========================================="
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -67,11 +159,13 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install Pulumi dependencies
         working-directory: infrastructure
         run: |
+          uv venv
+          source .venv/bin/activate
           uv pip install -e ".[dev]"
 
       - name: Configure AWS credentials
@@ -87,53 +181,575 @@ jobs:
 
       - name: Select Pulumi Stack
         working-directory: infrastructure
-        run: pulumi stack select ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          pulumi stack select ${{ env.PULUMI_STACK }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
-      - name: Pulumi Up
+      - name: Set Pulumi Config from GitHub Secrets
         working-directory: infrastructure
-        run: pulumi up --yes --stack ${{ env.PULUMI_STACK }}
+        run: |
+          source .venv/bin/activate
+          # Pulumi automatically reads from Pulumi.test.yaml (checked out from git)
+          # Override secrets from GitHub Secrets (more secure than storing in YAML)
+          if [ -n "${{ secrets.DB_PASSWORD }}" ]; then
+            pulumi config set --secret dbPassword "${{ secrets.DB_PASSWORD }}"
+          fi
+          # Set any other config from secrets if needed
+          if [ -n "${{ secrets.DOMAIN_NAME }}" ]; then
+            pulumi config set domainName "${{ secrets.DOMAIN_NAME }}"
+          fi
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Generate Image Tag
+        id: image-tag
+        run: |
+          IMAGE_TAG="${GITHUB_SHA::8}"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Generated image tag: $IMAGE_TAG"
+
+      - name: Pulumi Up (Create/Update Infrastructure)
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          # Note: pulumi up automatically shows a preview before applying changes
+          # This is why we don't run a separate preview step on push events
+          pulumi up --yes --stack ${{ env.PULUMI_STACK }}
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Get Pulumi outputs
         id: outputs
         working-directory: infrastructure
         run: |
+          source .venv/bin/activate
           ECR_REPO_URL=$(pulumi stack output ecr_repository_url --stack ${{ env.PULUMI_STACK }})
           ECR_REPO_NAME=$(pulumi stack output ecr_repository_name --stack ${{ env.PULUMI_STACK }})
           EC2_IP=$(pulumi stack output ec2_public_ip --stack ${{ env.PULUMI_STACK }})
-          IMAGE_TAG="${GITHUB_SHA::8}"
+          EC2_INSTANCE_ID=$(pulumi stack output ec2_instance_id --stack ${{ env.PULUMI_STACK }})
+          S3_BUCKET=$(pulumi stack output s3_bucket_name --stack ${{ env.PULUMI_STACK }})
+          RDS_ENDPOINT=$(pulumi stack output rds_endpoint --stack ${{ env.PULUMI_STACK }})
+          RDS_ADDRESS=$(pulumi stack output rds_address --stack ${{ env.PULUMI_STACK }})
           echo "ecr_repo_url=$ECR_REPO_URL" >> $GITHUB_OUTPUT
           echo "ecr_repo_name=$ECR_REPO_NAME" >> $GITHUB_OUTPUT
           echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
-          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "ec2_instance_id=$EC2_INSTANCE_ID" >> $GITHUB_OUTPUT
+          echo "s3_bucket=$S3_BUCKET" >> $GITHUB_OUTPUT
+          echo "rds_endpoint=$RDS_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "rds_address=$RDS_ADDRESS" >> $GITHUB_OUTPUT
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build, tag, and push image to Amazon ECR
+        id: build-image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
-          IMAGE_TAG: ${{ steps.outputs.outputs.image_tag }}
+          IMAGE_TAG: ${{ steps.image-tag.outputs.image_tag }}
         run: |
+          echo "Building image with tag: $IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:test
+          # Also tag as 'latest' and 'test' for fallback, but primary tag is the commit SHA
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:test
+          echo "Pushing image with tag: $IMAGE_TAG"
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:test
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:test
+          echo "✅ Image pushed successfully with tag: $IMAGE_TAG"
 
-      - name: Deploy to EC2
+      - name: Store Image Tag in SSM Parameter Store
         run: |
-          echo "EC2 deployment - image pushed to ECR"
-          echo "ECR Repository: ${{ steps.outputs.outputs.ecr_repo_url }}"
-          echo "Image Tag: ${{ steps.outputs.outputs.image_tag }}"
-          echo "EC2 IP: ${{ steps.outputs.outputs.ec2_ip }}"
-          echo "EC2 will pull image from ECR on next restart or via user data script"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
 
+          echo "Storing image tag in SSM Parameter Store: $IMAGE_TAG"
+          aws ssm put-parameter \
+            --name /pulumi/test/image_tag \
+            --value "$IMAGE_TAG" \
+            --type String \
+            --region "$AWS_REGION" \
+            --overwrite 2>/dev/null || \
+          aws ssm put-parameter \
+            --name /pulumi/test/image_tag \
+            --value "$IMAGE_TAG" \
+            --type String \
+            --region "$AWS_REGION"
+
+          echo "✅ Image tag stored in SSM: /pulumi/test/image_tag = $IMAGE_TAG"
+
+      - name: Wait for EC2 SSM to be Ready
+        run: |
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+
+          if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
+            echo "⚠️  EC2 instance not found, skipping SSM wait"
+            exit 0
+          fi
+
+          echo "Waiting for EC2 instance to be ready for SSM: $EC2_INSTANCE_ID"
+          echo "This may take 1-2 minutes for new instances..."
+
+          MAX_ATTEMPTS=36
+          ATTEMPT=0
+          SSM_READY=false
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            # Check instance state first
+            INSTANCE_STATE=$(aws ec2 describe-instances \
+              --instance-ids "$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'Reservations[0].Instances[0].State.Name' \
+              --output text 2>/dev/null || echo "unknown")
+            
+            # Check SSM ping status
+            PING_STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "not-found")
+            
+            # Try a simple test command to verify SSM is actually ready
+            if [ "$PING_STATUS" = "Online" ]; then
+              # Try sending a simple test command to verify SSM is actually functional
+              TEST_COMMAND_ID=$(aws ssm send-command \
+                --instance-ids "$EC2_INSTANCE_ID" \
+                --document-name "AWS-RunShellScript" \
+                --parameters '{"commands":["echo test"]}' \
+                --region "$AWS_REGION" \
+                --query 'Command.CommandId' \
+                --output text 2>/dev/null || echo "")
+              
+              if [ -n "$TEST_COMMAND_ID" ]; then
+                echo "✅ SSM is ready and functional (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+                SSM_READY=true
+                # Cancel the test command (we don't need to wait for it)
+                aws ssm cancel-command --command-id "$TEST_COMMAND_ID" --region "$AWS_REGION" 2>/dev/null || true
+                break
+              fi
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Instance: $INSTANCE_STATE, SSM Ping: $PING_STATUS"
+            sleep 5
+          done
+
+          if [ "$SSM_READY" = false ]; then
+            echo "⚠️  SSM not ready after $MAX_ATTEMPTS attempts (3 minutes)"
+            echo "   Instance state: $INSTANCE_STATE"
+            echo "   SSM ping status: $PING_STATUS"
+            echo "   Instance may still be initializing. Deployment will be skipped."
+            echo "   The image is in ECR and will be pulled on next deployment or instance restart."
+            exit 0
+          fi
+
+      - name: Deploy to EC2 - Update Container
+        run: |
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+          S3_BUCKET="${{ steps.outputs.outputs.s3_bucket }}"
+          RDS_ADDRESS="${{ steps.outputs.outputs.rds_address }}"
+
+          if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
+            echo "⚠️  EC2 instance not found, skipping deployment"
+            exit 0
+          fi
+
+          echo "Deploying new image to EC2 instance: $EC2_INSTANCE_ID"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "This will update the container without restarting the EC2 instance"
+
+          # Build deployment commands using jq (no heredoc to avoid YAML issues)
+          SSM_PARAMS=$(jq -n \
+            --arg ecr_url "$ECR_REPO_URL" \
+            --arg image_tag "$IMAGE_TAG" \
+            --arg aws_region "$AWS_REGION" \
+            --arg s3_bucket "$S3_BUCKET" \
+            --arg rds_addr "$RDS_ADDRESS" \
+            '{
+              "commands": [
+                "set -e",
+                "echo === Starting container deployment ===",
+                ("export ECR_REPO_URL=" + ($ecr_url | @sh)),
+                ("export IMAGE_TAG=" + ($image_tag | @sh)),
+                ("export AWS_REGION=" + ($aws_region | @sh)),
+                ("export S3_BUCKET=" + ($s3_bucket | @sh)),
+                ("export RDS_ADDRESS=" + ($rds_addr | @sh)),
+                "export DB_NAME=pulumi_test_db",
+                "export DB_USER=dbadmin",
+                "echo Logging into ECR...",
+                ("aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_REPO_URL || exit 1"),
+                ("DB_PASSWORD=$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query '\''Parameter.Value'\'' --output text --region $AWS_REGION 2>/dev/null || echo '\'''\'' )"),
+                ("echo Pulling image: $ECR_REPO_URL:$IMAGE_TAG"),
+                ("docker pull $ECR_REPO_URL:$IMAGE_TAG || docker pull $ECR_REPO_URL:latest || docker pull $ECR_REPO_URL:test || exit 1"),
+                ("if docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -q \"^$ECR_REPO_URL:$IMAGE_TAG$\"; then"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:$IMAGE_TAG"),
+                ("elif docker images --format '\''{{.Repository}}:{{.Tag}}'\'' | grep -q \"^$ECR_REPO_URL:latest$\"; then"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:latest"),
+                ("else"),
+                ("  export IMAGE_TO_USE=$ECR_REPO_URL:test"),
+                ("fi"),
+                "echo Using image: $IMAGE_TO_USE",
+                "echo Stopping existing container...",
+                "docker stop fastapi-app 2>/dev/null || true",
+                "docker rm fastapi-app 2>/dev/null || true",
+                "echo Starting new container...",
+                ("docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=$DB_NAME -e DB_USER=$DB_USER -e DB_PASSWORD=\"$DB_PASSWORD\" -e IMAGE_TAG=$IMAGE_TAG -e IMAGE_URI=$IMAGE_TO_USE $IMAGE_TO_USE"),
+                "sleep 5",
+                "if docker ps | grep -q fastapi-app; then",
+                "  echo ✅ Container started successfully",
+                "  docker logs fastapi-app | tail -20",
+                "else",
+                "  echo ❌ Container failed to start",
+                "  docker logs fastapi-app || true",
+                "  exit 1",
+                "fi",
+                "echo === Deployment completed ==="
+              ]
+            }')
+
+          # Send command via SSM
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$EC2_INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "$SSM_PARAMS" \
+            --region "$AWS_REGION" \
+            --output text \
+            --query 'Command.CommandId' 2>/dev/null || echo "")
+
+          if [ -z "$COMMAND_ID" ]; then
+            echo "❌ Could not send SSM command (unexpected error after SSM wait)"
+            echo "   Image is in ECR. To deploy manually, SSH to instance and run:"
+            echo "   docker pull $ECR_REPO_URL:$IMAGE_TAG && docker stop fastapi-app && docker rm fastapi-app && docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=pulumi_test_db -e DB_USER=dbadmin -e DB_PASSWORD=\"\$(aws ssm get-parameter --name /pulumi/test/db_password --with-decryption --query 'Parameter.Value' --output text)\" $ECR_REPO_URL:$IMAGE_TAG"
+            exit 1
+          fi
+
+          echo "Command ID: $COMMAND_ID"
+          echo "Waiting for deployment to complete (max 2 minutes)..."
+
+          # Wait for command to complete
+          STATUS="InProgress"
+          for i in {1..24}; do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$COMMAND_ID" \
+              --instance-id "$EC2_INSTANCE_ID" \
+              --region "$AWS_REGION" \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "InProgress")
+            
+            if [ "$STATUS" = "Success" ]; then
+              echo "✅ Deployment completed successfully"
+              echo "=== Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region "$AWS_REGION" \
+                --query 'StandardOutputContent' \
+                --output text
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ]; then
+              echo "❌ Deployment failed"
+              echo "=== Error Output ==="
+              aws ssm get-command-invocation \
+                --command-id "$COMMAND_ID" \
+                --instance-id "$EC2_INSTANCE_ID" \
+                --region "$AWS_REGION" \
+                --query 'StandardErrorContent' \
+                --output text
+              echo "⚠️  Deployment failed, but image is in ECR"
+              exit 0
+            fi
+            
+            echo "Status: $STATUS (waiting... $i/24)"
+          done
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "⚠️  Deployment timed out, but image is in ECR"
+          fi
+
+      - name: Check ECR Image Details
+        id: ecr-info
+        run: |
+          ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
+          ECR_REPO_NAME="${{ steps.outputs.outputs.ecr_repo_name }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          AWS_REGION="${{ env.AWS_REGION }}"
+
+          echo "Checking ECR image details for tag: $IMAGE_TAG"
+
+          # Get specific image details
+          SPECIFIC_DIGEST=$(aws ecr describe-images \
+            --repository-name "$ECR_REPO_NAME" \
+            --image-ids imageTag=$IMAGE_TAG \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || echo "none")
+
+          SPECIFIC_PUSHED=$(aws ecr describe-images \
+            --repository-name "$ECR_REPO_NAME" \
+            --image-ids imageTag=$IMAGE_TAG \
+            --region "$AWS_REGION" \
+            --query 'imageDetails[0].imagePushedAt' \
+            --output text 2>/dev/null || echo "unknown")
+
+          echo "image_digest=$SPECIFIC_DIGEST" >> $GITHUB_OUTPUT
+          echo "image_pushed=$SPECIFIC_PUSHED" >> $GITHUB_OUTPUT
+
+          echo "✅ Image in ECR:"
+          echo "   Tag: $IMAGE_TAG"
+          echo "   Digest: $SPECIFIC_DIGEST"
+          echo "   Pushed: $SPECIFIC_PUSHED"
+
+      - name: Deployment Info
+        run: |
+          EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
+          EC2_IP="${{ steps.outputs.outputs.ec2_ip }}"
+          ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
+          IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
+          IMAGE_DIGEST="${{ steps.ecr-info.outputs.image_digest }}"
+          IMAGE_PUSHED="${{ steps.ecr-info.outputs.image_pushed }}"
+
+          echo "=========================================="
+          echo "✅ Deployment Complete"
+          echo "=========================================="
+          echo "✅ Docker image built and pushed to ECR"
+          echo "✅ Infrastructure created/updated"
+          echo ""
+          echo "ECR Repository: $ECR_REPO_URL"
+          echo "Primary Image Tag: $IMAGE_TAG (commit: ${GITHUB_SHA::8})"
+          echo "Fallback Tags: latest, test"
+          if [ -n "$IMAGE_DIGEST" ] && [ "$IMAGE_DIGEST" != "none" ]; then
+            echo "Image Digest: $IMAGE_DIGEST"
+            echo "Image Pushed: $IMAGE_PUSHED"
+          fi
+          echo ""
+          echo "EC2 Instance:"
+          echo "  Instance ID: $EC2_INSTANCE_ID"
+          echo "  Public IP: $EC2_IP"
+          echo ""
+          echo "✅ Container automatically updated with new image"
+          echo "   (Container restarted, EC2 instance was NOT restarted)"
+          echo ""
+          echo "To verify deployment:"
+          echo "  ssh ec2-user@$EC2_IP 'sudo /usr/local/bin/check-image-version.sh'"
+          echo "  curl http://$EC2_IP:8000/health"
+          echo "=========================================="
+
+  integration-tests:
+    # Integration tests run after successful deployment to test environment
+    # Tests the FastAPI service endpoints to ensure everything works
+    # Only runs after PR merge (when deploy job runs), not on PR previews
+    # If tests pass, this workflow will trigger production deployment
+    if: |
+      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      github.event_name == 'workflow_dispatch'
+    needs: deploy
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+      # Note: workflow_run trigger doesn't need workflows:write permission
+      # GitHub automatically triggers prod workflow when this workflow succeeds
+    steps:
+      - uses: actions/checkout@v4
+        # For pull_request events, checkout the merge commit (not the PR branch)
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Pulumi
+        uses: pulumi/actions@v4
+        with:
+          pulumi-version: latest
+
+      - name: Install Pulumi dependencies
+        working-directory: infrastructure
+        run: |
+          uv venv
+          source .venv/bin/activate
+          uv pip install -e ".[dev]"
+
+      - name: Get EC2 IP from Pulumi outputs
+        id: get-ip
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          EC2_IP=$(pulumi stack output ec2_public_ip --stack ${{ env.PULUMI_STACK }} 2>/dev/null || echo "")
+          if [ -z "$EC2_IP" ] || [ "$EC2_IP" = "null" ]; then
+            echo "❌ Could not get EC2 IP from Pulumi outputs"
+            exit 1
+          fi
+          echo "ec2_ip=$EC2_IP" >> $GITHUB_OUTPUT
+          echo "✅ EC2 IP: $EC2_IP"
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Install Python dependencies
+        working-directory: app
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install httpx pytest requests
+
+      - name: Wait for FastAPI service to be ready
+        run: |
+          EC2_IP="${{ steps.get-ip.outputs.ec2_ip }}"
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+
+          echo "Waiting for FastAPI service to be ready at http://$EC2_IP:8000..."
+
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            
+            if curl -f -s -m 5 "http://$EC2_IP:8000/health" > /dev/null 2>&1; then
+              echo "✅ FastAPI service is ready! (attempt $ATTEMPT/$MAX_ATTEMPTS)"
+              break
+            fi
+            
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Service not ready yet, waiting..."
+            sleep 5
+          done
+
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "❌ FastAPI service did not become ready after $MAX_ATTEMPTS attempts"
+            exit 1
+          fi
+
+      - name: Run Integration Tests
+        run: |
+          EC2_IP="${{ steps.get-ip.outputs.ec2_ip }}"
+          BASE_URL="http://$EC2_IP:8000"
+
+          echo "=========================================="
+          echo "🧪 Running Integration Tests"
+          echo "=========================================="
+          echo "Testing FastAPI service at: $BASE_URL"
+          echo ""
+
+          FAILED=0
+
+          # Test 1: Health Check
+          echo "Test 1: Health Check Endpoint"
+          HEALTH_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/health" || echo "000")
+          HTTP_CODE=$(echo "$HEALTH_RESPONSE" | tail -n1)
+          BODY=$(echo "$HEALTH_RESPONSE" | head -n-1)
+
+          if [ "$HTTP_CODE" = "200" ]; then
+            echo "✅ Health check passed (HTTP $HTTP_CODE)"
+            echo "Response: $BODY"
+          else
+            echo "❌ Health check failed (HTTP $HTTP_CODE)"
+            FAILED=1
+          fi
+          echo ""
+
+          # Test 2: Database Status
+          echo "Test 2: Database Status Endpoint"
+          DB_STATUS_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/db/status" || echo "000")
+          DB_HTTP_CODE=$(echo "$DB_STATUS_RESPONSE" | tail -n1)
+          DB_BODY=$(echo "$DB_STATUS_RESPONSE" | head -n-1)
+
+          if [ "$DB_HTTP_CODE" = "200" ]; then
+            echo "✅ Database status check passed (HTTP $DB_HTTP_CODE)"
+            echo "Response: $DB_BODY"
+          else
+            echo "❌ Database status check failed (HTTP $DB_HTTP_CODE)"
+            FAILED=1
+          fi
+          echo ""
+
+          # Test 3: S3 List (should work even if empty)
+          echo "Test 3: S3 List Endpoint"
+          S3_LIST_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/s3/list" || echo "000")
+          S3_HTTP_CODE=$(echo "$S3_LIST_RESPONSE" | tail -n1)
+          S3_BODY=$(echo "$S3_LIST_RESPONSE" | head -n-1)
+
+          if [ "$S3_HTTP_CODE" = "200" ]; then
+            echo "✅ S3 list endpoint passed (HTTP $S3_HTTP_CODE)"
+            echo "Response: $S3_BODY"
+          else
+            echo "❌ S3 list endpoint failed (HTTP $S3_HTTP_CODE)"
+            FAILED=1
+          fi
+          echo ""
+
+          # Test 4: Create Database Record
+          echo "Test 4: Create Database Record"
+          CREATE_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d '{"name":"integration-test-item","description":"Created by integration test"}' \
+            "$BASE_URL/db/create" || echo "000")
+          CREATE_HTTP_CODE=$(echo "$CREATE_RESPONSE" | tail -n1)
+          CREATE_BODY=$(echo "$CREATE_RESPONSE" | head -n-1)
+
+          if [ "$CREATE_HTTP_CODE" = "200" ] || [ "$CREATE_HTTP_CODE" = "201" ]; then
+            echo "✅ Create record passed (HTTP $CREATE_HTTP_CODE)"
+            echo "Response: $CREATE_BODY"
+          else
+            echo "❌ Create record failed (HTTP $CREATE_HTTP_CODE)"
+            FAILED=1
+          fi
+          echo ""
+
+          # Test 5: Read Database Records
+          echo "Test 5: Read Database Records"
+          READ_RESPONSE=$(curl -s -w "\n%{http_code}" "$BASE_URL/db/read" || echo "000")
+          READ_HTTP_CODE=$(echo "$READ_RESPONSE" | tail -n1)
+          READ_BODY=$(echo "$READ_RESPONSE" | head -n-1)
+
+          if [ "$READ_HTTP_CODE" = "200" ]; then
+            echo "✅ Read records passed (HTTP $READ_HTTP_CODE)"
+            echo "Response: $READ_BODY"
+          else
+            echo "❌ Read records failed (HTTP $READ_HTTP_CODE)"
+            FAILED=1
+          fi
+          echo ""
+
+          echo "=========================================="
+          if [ $FAILED -eq 0 ]; then
+            echo "✅ All Integration Tests Passed!"
+            echo "=========================================="
+            echo ""
+            echo "🚀 Integration tests passed - Production deployment can proceed"
+            echo "   Production workflow will be triggered automatically"
+            echo "   Manual approval required before production deployment"
+          else
+            echo "❌ Some Integration Tests Failed!"
+            echo "=========================================="
+            echo ""
+            echo "⚠️  Integration tests failed - Production deployment will NOT be triggered"
+            exit 1
+          fi

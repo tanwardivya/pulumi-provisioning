@@ -1,11 +1,11 @@
 """Configuration management for Pulumi stacks."""
 import pulumi
-from infrastructure.types.networking_config import NetworkingConfig
-from infrastructure.types.s3_config import S3BucketConfig
-from infrastructure.types.rds_config import RDSConfig
-from infrastructure.types.ec2_config import EC2Config
-from infrastructure.types.iam_config import IAMConfig
-from infrastructure.types.ecr_config import ECRConfig
+from infrastructure.config_types.networking_config import NetworkingConfig
+from infrastructure.config_types.s3_config import S3BucketConfig
+from infrastructure.config_types.rds_config import RDSConfig
+from infrastructure.config_types.ec2_config import EC2Config
+from infrastructure.config_types.iam_config import IAMConfig
+from infrastructure.config_types.ecr_config import ECRConfig
 
 
 def get_config():
@@ -45,7 +45,10 @@ def get_config():
         engine=config.get("dbEngine") or "postgres",
         instance_class=config.get("dbInstanceClass") or "db.t3.micro",
         allocated_storage=config.get_int("dbAllocatedStorage") or 20,
+        username=config.get("dbUsername"),  # Optional - defaults to "dbadmin" in component
         multi_az=config.get_bool("dbMultiAz") if config.get("dbMultiAz") else False,
+        backup_retention_period=config.get_int("dbBackupRetentionPeriod") if config.get("dbBackupRetentionPeriod") else 0,  # 0 for free tier compatibility
+        skip_final_snapshot=config.get_bool("dbSkipFinalSnapshot") if config.get("dbSkipFinalSnapshot") else True,  # True for free tier
         tags=base_tags,
     )
     

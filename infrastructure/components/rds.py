@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.rds_config import RDSConfig
+from infrastructure.config_types.rds_config import RDSConfig
 
 
 class RDSComponent(BaseComponent):
@@ -38,7 +38,7 @@ class RDSComponent(BaseComponent):
             allocated_storage=config.allocated_storage,
             storage_type=config.storage_type,
             db_name=config.db_name,
-            username="admin",  # Can be made configurable
+            username=config.username or "dbadmin",  # "admin" is reserved in PostgreSQL
             password=db_password,
             db_subnet_group_name=self.db_subnet_group.name,
             vpc_security_group_ids=[security_group_id] if security_group_id else [],

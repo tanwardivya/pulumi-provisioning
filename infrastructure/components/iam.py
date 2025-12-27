@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.iam_config import IAMConfig
+from infrastructure.config_types.iam_config import IAMConfig
 
 
 class IAMComponent(BaseComponent):
@@ -16,87 +16,154 @@ class IAMComponent(BaseComponent):
         rds_arn = rds_instance_arn or config.rds_instance_arn
         ecr_arn = ecr_repository_arn or config.ecr_repository_arn
         
-        # Build policy document for EC2 role
-        policy_statements = []
-        
-        # S3 access policy
+        # Collect all ARN outputs to resolve them together
+        # Note: RDS IAM authentication is skipped (requires special ARN format conversion)
+        arn_outputs = []
         if s3_arns:
-            s3_resources = []
-            for bucket_arn in s3_arns:
-                s3_resources.append(bucket_arn)
-                s3_resources.append(f"{bucket_arn}/*")
-            
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "s3:GetObject",
-                    "s3:PutObject",
-                    "s3:DeleteObject",
-                    "s3:ListBucket",
-                ],
-                "Resource": s3_resources,
-            })
-        
-        # RDS access policy (for connection, not direct RDS management)
-        if rds_arn:
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "rds-db:connect",
-                ],
-                "Resource": rds_arn,
-            })
-        
-        # ECR access policy (for pulling images)
+            arn_outputs.extend(s3_arns)
+        # RDS ARN not included - RDS IAM auth requires special ARN format (rds-db:connect)
+        # Connection will use username/password instead
         if ecr_arn:
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:GetAuthorizationToken",
-                    "ecr:BatchCheckLayerAvailability",
-                    "ecr:GetDownloadUrlForLayer",
-                    "ecr:BatchGetImage",
-                ],
-                "Resource": "*",
-            })
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "ecr:DescribeRepositories",
-                    "ecr:DescribeImages",
-                ],
-                "Resource": ecr_arn,
-            })
+            arn_outputs.append(ecr_arn)
         
-        # Create IAM role
-        assume_role_policy = aws.iam.get_policy_document(
-            statements=[aws.iam.GetPolicyDocumentStatementArgs(
-                effect="Allow",
-                principals=[aws.iam.GetPolicyDocumentStatementPrincipalArgs(
-                    type="Service",
-                    identifiers=["ec2.amazonaws.com"],
-                )],
-                actions=["sts:AssumeRole"],
-            )]
-        )
+        # Build policy document after ARNs are resolved
+        def build_policy_document(*resolved_arns):
+            import json
+            policy_statements = []
+            arn_index = 0
+            
+            # S3 access policy
+            if s3_arns and len(s3_arns) > 0:
+                s3_resources = []
+                for _ in s3_arns:
+                    if arn_index < len(resolved_arns):
+                        bucket_arn = resolved_arns[arn_index]
+                        # Validate ARN is not None/empty and is a string
+                        if bucket_arn and isinstance(bucket_arn, str) and bucket_arn.strip():
+                            s3_resources.append(bucket_arn.strip())
+                            s3_resources.append(f"{bucket_arn.strip()}/*")
+                        arn_index += 1
+                
+                if s3_resources:  # Only add statement if we have resources
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:GetObject",
+                            "s3:PutObject",
+                            "s3:DeleteObject",
+                            "s3:ListBucket",
+                        ],
+                        "Resource": s3_resources,
+                    })
+            
+            # RDS access policy (for connection, not direct RDS management)
+            # Note: rds-db:connect requires special ARN format: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-username
+            # For now, we'll skip RDS IAM authentication and use username/password instead
+            # If needed, this can be added later with proper ARN conversion
+            # RDS connection uses username/password authentication (configured in user_data script)
+            
+            # ECR access policy (for pulling images)
+            # ECR ARN should be at index = len(s3_arns) since we skipped RDS
+            if ecr_arn:
+                ecr_index = len(s3_arns) if s3_arns else 0
+                if ecr_index < len(resolved_arns):
+                    ecr_resource = resolved_arns[ecr_index]
+                    # Validate ARN is not None/empty and is a string
+                    if ecr_resource and isinstance(ecr_resource, str) and ecr_resource.strip():
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:GetAuthorizationToken",
+                            ],
+                            "Resource": ["*"],
+                        })
+                        policy_statements.append({
+                            "Effect": "Allow",
+                            "Action": [
+                                "ecr:BatchCheckLayerAvailability",
+                                "ecr:GetDownloadUrlForLayer",
+                                "ecr:BatchGetImage",
+                                "ecr:DescribeRepositories",
+                                "ecr:DescribeImages",
+                                "ecr:ListImages",
+                            ],
+                            "Resource": [ecr_resource.strip()],
+                        })
+            
+            # SSM Parameter Store access (for DB password and other secrets)
+            policy_statements.append({
+                "Effect": "Allow",
+                "Action": [
+                    "ssm:GetParameter",
+                    "ssm:GetParameters",
+                    "ssm:DescribeParameters",
+                ],
+                "Resource": [
+                    "arn:aws:ssm:*:*:parameter/pulumi/*"
+                ],
+            })
+            
+            # Build policy document
+            policy_doc = {
+                "Version": "2012-10-17",
+                "Statement": policy_statements
+            }
+            return json.dumps(policy_doc)
+        
+        # Resolve all ARNs and build policy
+        if arn_outputs:
+            policy_json = pulumi.Output.all(*arn_outputs).apply(build_policy_document)
+        else:
+            # No policy statements needed
+            policy_json = None
+        
+        # Create IAM role with assume role policy
+        import json
+        assume_role_policy_json = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "ec2.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+            }]
+        })
         
         self.role = aws.iam.Role(
             f"{name}-role",
-            assume_role_policy=assume_role_policy.json,
+            assume_role_policy=assume_role_policy_json,
             tags=config.tags or {},
             opts=pulumi.ResourceOptions(parent=self)
         )
         
         # Attach inline policy if we have statements
-        if policy_statements:
-            policy_doc = aws.iam.get_policy_document(statements=policy_statements)
-            
+        if policy_json:
             self.policy = aws.iam.RolePolicy(
                 f"{name}-policy",
                 role=self.role.id,
-                policy=policy_doc.json,
+                policy=policy_json,
                 opts=pulumi.ResourceOptions(parent=self)
             )
+        else:
+            self.policy = None
+        
+        # Attach ECR read-only managed policy (for pulling Docker images)
+        if ecr_arn:
+            aws.iam.RolePolicyAttachment(
+                f"{name}-ecr-policy",
+                role=self.role.id,
+                policy_arn="arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
+                opts=pulumi.ResourceOptions(parent=self)
+            )
+        
+        # Attach SSM managed instance core policy (required for SSM agent to register)
+        aws.iam.RolePolicyAttachment(
+            f"{name}-ssm-policy",
+            role=self.role.id,
+            policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+            opts=pulumi.ResourceOptions(parent=self)
+        )
         
         # Attach additional managed policies if provided
         if config.additional_policies:

@@ -49,41 +49,119 @@ Before setting up OIDC, you need:
 
 ## Step-by-Step Setup
 
-### Step 1: Create OIDC Identity Provider in AWS
+### Step 1: Get GitHub OIDC Thumbprint
+
+**IMPORTANT:** GitHub rotates SSL certificates, so the thumbprint changes. Always get the current thumbprint first.
+
+**Option A: Use the provided script (Recommended)**
+```bash
+cd /Users/divyadhara/git_repos/pulumi-provisioning
+./get-github-thumbprint.sh
+```
+
+**Option B: Get thumbprint manually**
+```bash
+echo | openssl s_client -servername token.actions.githubusercontent.com \
+  -showcerts -connect token.actions.githubusercontent.com:443 2>/dev/null | \
+  openssl x509 -fingerprint -noout -sha1 | \
+  sed 's/://g' | \
+  cut -d'=' -f2 | \
+  tr '[:upper:]' '[:lower:]'
+```
+
+**Current Thumbprint (as of Dec 2024):**
+```
+7560d6f40fa55195f740ee2b1b7c0b4836cbe103
+```
+
+**Note:** If this thumbprint doesn't work, run the script above to get the latest one.
+
+---
+
+### Step 2: Create OIDC Identity Provider in AWS
 
 This tells AWS to trust GitHub as an identity provider.
 
-1. **Go to AWS Console**
-   - Navigate to: **IAM** → **Identity providers**
-   - Or direct link: https://console.aws.amazon.com/iam/home#/providers
-
-2. **Add Provider**
-   - Click **"Add provider"** button
-   - Select **"OpenID Connect"** tab
-
-3. **Configure Provider**
-   - **Provider URL**: `https://token.actions.githubusercontent.com`
-   - **Audience**: `sts.amazonaws.com`
-   - Click **"Add provider"**
-
-4. **Verify Provider Created**
-   - You should see `token.actions.githubusercontent.com` in the list
-   - Note the **Provider ARN** (you'll need this later)
-   - Format: `arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com`
-
-**Screenshot Reference:**
+**Using AWS CLI (Recommended):**
+```bash
+# Replace THUMBPRINT with the value from Step 1
+aws iam create-open-id-connect-provider \
+  --url https://token.actions.githubusercontent.com \
+  --client-id-list sts.amazonaws.com \
+  --thumbprint-list 7560d6f40fa55195f740ee2b1b7c0b4836cbe103
 ```
-Provider URL: https://token.actions.githubusercontent.com
-Audience:     sts.amazonaws.com
+
+**Expected Output:**
+```json
+{
+    "OpenIDConnectProviderArn": "arn:aws:iam::928618160741:oidc-provider/token.actions.githubusercontent.com"
+}
+```
+
+**Using AWS Console:**
+1. Go to AWS Console → **IAM** → **Identity providers**
+2. Click **"Add provider"** → Select **"OpenID Connect"** tab
+3. **Provider URL**: `https://token.actions.githubusercontent.com`
+4. **Audience**: `sts.amazonaws.com`
+5. Click **"Add provider"**
+
+**Verify Provider Created:**
+```bash
+aws iam list-open-id-connect-providers
 ```
 
 ---
 
-### Step 2: Create IAM Role for GitHub Actions
+### Step 3: Create Trust Policy File
+
+Create a trust policy that defines which GitHub repository can assume the role.
+
+```bash
+cd /Users/divyadhara/git_repos/pulumi-provisioning
+
+# Update these values for your setup:
+# - Account ID: 928618160741 (replace with your AWS account ID)
+# - Repository: tanwardivya/pulumi-provisioning (replace with your GitHub username/repo)
+cat > github-actions-trust-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::928618160741:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:tanwardivya/pulumi-provisioning:*"
+        }
+      }
+    }
+  ]
+}
+EOF
+```
+
+**Important:** Update the values:
+- `928618160741` → Your AWS Account ID
+- `tanwardivya/pulumi-provisioning` → Your GitHub username/repository
+
+**Verify the file:**
+```bash
+cat github-actions-trust-policy.json
+```
+
+---
+
+### Step 4: Create IAM Role for GitHub Actions
 
 This role will be assumed by GitHub Actions to access AWS.
 
-#### Option A: Using AWS Console (Recommended for Beginners)
+#### Option A: Using AWS CLI (Recommended)
 
 1. **Go to IAM Roles**
    - Navigate to: **IAM** → **Roles**
@@ -107,7 +185,7 @@ This role will be assumed by GitHub Actions to access AWS.
    - **Key**: `token.actions.githubusercontent.com:sub`
    - **Value**: `repo:YOUR_GITHUB_USERNAME/YOUR_REPO_NAME:*`
    
-   Example: `repo:divyadhara/pulumi-provisioning:*`
+   Example: `repo:tanwardivya/pulumi-provisioning:*`
    
    This ensures only your repository can use this role.
 
@@ -127,63 +205,33 @@ This role will be assumed by GitHub Actions to access AWS.
    - Copy the **Role ARN** (you'll need this for GitHub Secrets)
    - Format: `arn:aws:iam::YOUR_ACCOUNT_ID:role/github-actions-pulumi-role`
 
-#### Option B: Using AWS CLI
-
 ```bash
-# Create trust policy file
-cat > github-actions-trust-policy.json <<EOF
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
-        },
-        "StringLike": {
-          "token.actions.githubusercontent.com:sub": "repo:YOUR_GITHUB_USERNAME/YOUR_REPO_NAME:*"
-        }
-      }
-    }
-  ]
-}
-EOF
-
 # Create the role
 aws iam create-role \
   --role-name github-actions-pulumi-role \
   --assume-role-policy-document file://github-actions-trust-policy.json \
   --description "IAM role for GitHub Actions to deploy infrastructure via Pulumi"
 
-# Attach policy (replace with your policy ARN)
+# Attach AdministratorAccess policy (for development)
+# For production, use a custom least-privilege policy instead
 aws iam attach-role-policy \
   --role-name github-actions-pulumi-role \
   --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 
-# Get the role ARN
+# Get the role ARN (copy this for GitHub Secrets)
 aws iam get-role --role-name github-actions-pulumi-role --query 'Role.Arn' --output text
 ```
 
----
-
-### Step 3: Get Your AWS Account ID
-
-You'll need this for the trust policy:
-
-```bash
-aws sts get-caller-identity --query Account --output text
+**Expected Output:**
+```
+arn:aws:iam::928618160741:role/github-actions-pulumi-role
 ```
 
-Or find it in the AWS Console (top right corner, next to your username).
+#### Option B: Using AWS Console
 
 ---
 
-### Step 4: Add Role ARN to GitHub Secrets
+### Step 5: Add Role ARN to GitHub Secrets
 
 1. **Go to GitHub Repository**
    - Navigate to: **Settings** → **Secrets and variables** → **Actions**
@@ -200,7 +248,21 @@ Or find it in the AWS Console (top right corner, next to your username).
 
 ---
 
-### Step 5: Update GitHub Actions Workflow
+### Step 6: Add Pulumi Access Token (if not already added)
+
+Your workflows also need a Pulumi access token:
+
+1. Go to: https://app.pulumi.com/account/tokens
+2. Create a new token (or use existing one)
+3. Go to GitHub: https://github.com/tanwardivya/pulumi-provisioning/settings/secrets/actions
+4. Click "New repository secret"
+5. Name: `PULUMI_ACCESS_TOKEN`
+6. Value: Paste your Pulumi token
+7. Click "Add secret"
+
+---
+
+### Step 7: Verify GitHub Actions Workflow Configuration
 
 Your workflow should already be configured! Check that it has:
 
@@ -340,7 +402,7 @@ aws iam list-open-id-connect-providers
 # {
 #   "OpenIDConnectProviderList": [
 #     {
-#       "Arn": "arn:aws:iam::YOUR_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+#       "Arn": "arn:aws:iam::928618160741:oidc-provider/token.actions.githubusercontent.com"
 #     }
 #   ]
 # }
@@ -400,6 +462,10 @@ aws iam list-attached-role-policies --role-name github-actions-pulumi-role
 ```bash
 # Get AWS Account ID
 aws sts get-caller-identity --query Account --output text
+# Output: 928618160741
+
+# Get GitHub thumbprint (use script)
+./get-github-thumbprint.sh
 
 # List OIDC providers
 aws iam list-open-id-connect-providers
@@ -432,17 +498,37 @@ After setting up OIDC:
 
 ---
 
-## Summary
+## Complete Setup Summary
 
 **OIDC Setup Checklist:**
 
-- [ ] Create OIDC identity provider in AWS IAM
-- [ ] Create IAM role with trust policy for GitHub
-- [ ] Attach necessary permissions to the role
-- [ ] Copy role ARN
-- [ ] Add `AWS_ROLE_ARN` to GitHub Secrets
-- [ ] Test workflow to verify it works
-- [ ] Monitor CloudTrail for security
+✅ **Step 1:** Get GitHub OIDC thumbprint (use `./get-github-thumbprint.sh`)
+✅ **Step 2:** Create OIDC identity provider in AWS IAM
+✅ **Step 3:** Create trust policy file (`github-actions-trust-policy.json`)
+✅ **Step 4:** Create IAM role with trust policy
+✅ **Step 5:** Attach permissions to role (AdministratorAccess for dev)
+✅ **Step 6:** Get role ARN and add `AWS_ROLE_ARN` to GitHub Secrets
+✅ **Step 7:** Add `PULUMI_ACCESS_TOKEN` to GitHub Secrets
+✅ **Step 8:** Verify workflow configuration
+
+**Quick Reference - Actual Values Used:**
+- **AWS Account ID:** `928618160741`
+- **GitHub Repository:** `tanwardivya/pulumi-provisioning`
+- **OIDC Provider ARN:** `arn:aws:iam::928618160741:oidc-provider/token.actions.githubusercontent.com`
+- **IAM Role Name:** `github-actions-pulumi-role`
+- **Role ARN:** `arn:aws:iam::928618160741:role/github-actions-pulumi-role`
+- **Current Thumbprint (Dec 2024):** `7560d6f40fa55195f740ee2b1b7c0b4836cbe103`
 
 **You're done!** Your GitHub Actions can now securely access AWS without storing any access keys. 🎉
+
+## Testing the Setup
+
+After completing all steps, test by:
+
+1. **Push a commit** to trigger the workflow
+2. **Check GitHub Actions** tab for workflow runs
+3. **Look for "Configure AWS credentials"** step - should show "Successfully configured AWS credentials"
+4. **Verify Pulumi commands** can access AWS resources
+
+If you encounter errors, see the Troubleshooting section above.
 

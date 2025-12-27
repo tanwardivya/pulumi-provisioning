@@ -3,7 +3,7 @@ import json
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.ecr_config import ECRConfig
+from infrastructure.config_types.ecr_config import ECRConfig
 
 
 class ECRComponent(BaseComponent):

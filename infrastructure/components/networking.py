@@ -2,7 +2,7 @@
 import pulumi
 import pulumi_aws as aws
 from infrastructure.components.base import BaseComponent
-from infrastructure.types.networking_config import NetworkingConfig
+from infrastructure.config_types.networking_config import NetworkingConfig
 
 
 class NetworkingComponent(BaseComponent):
@@ -159,6 +159,13 @@ class NetworkingComponent(BaseComponent):
                     to_port=443,
                     cidr_blocks=["0.0.0.0/0"],
                     description="HTTPS"
+                ),
+                aws.ec2.SecurityGroupIngressArgs(
+                    protocol="tcp",
+                    from_port=8000,
+                    to_port=8000,
+                    cidr_blocks=["0.0.0.0/0"],
+                    description="FastAPI direct access"
                 ),
             ],
             egress=[aws.ec2.SecurityGroupEgressArgs(

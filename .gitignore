@@ -58,3 +58,6 @@ logs/
 *.tmp
 *.bak
 
+# Pulumi verification scripts output
+*.preview.json
+
