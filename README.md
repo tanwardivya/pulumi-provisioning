@@ -274,17 +274,46 @@ uv add <package-name>
 
 ### Test Environment
 - **Trigger**: Push to `develop` or `test` branch
-- **Actions**: Preview on PR, deploy on push
+- **Actions**: 
+  - Preview on PR (shows changes before merge)
+  - Deploy on push (after merge)
+  - Run integration tests after deployment
 - **Stack**: `test`
 
 ### Production Environment
-- **Trigger**: Push to `main`/`master` or manual dispatch
-- **Actions**: Requires manual approval, deploys to production
+- **Trigger**: 
+  - Automatically after test workflow succeeds (integration tests passed)
+  - Push to `main`/`master` (direct deployment)
+  - Manual dispatch (emergency deployments)
+- **Actions**: 
+  - Requires manual approval (set in GitHub environment settings)
+  - Deploys to production only after approval
 - **Stack**: `prod`
 
+### Workflow Flow
+```
+1. PR Created → Preview runs (shows changes)
+2. PR Merged → Push to develop/test
+3. Test Deployment → Infrastructure deployed to test
+4. Integration Tests → Tests FastAPI endpoints
+5. If Tests Pass → Production workflow triggered
+6. Manual Approval → Required before production deploy
+7. Production Deploy → Infrastructure deployed to prod
+```
+
 ### Destroy Workflow
-- **Trigger**: Manual dispatch only
-- **Actions**: Destroys infrastructure with confirmation
+- **Trigger**: Manual dispatch only (workflow_dispatch)
+- **Safety Features**:
+  - ⚠️ Requires explicit confirmation: Type "DESTROY" (all caps) to proceed
+  - 📋 Shows preview of resources before destruction
+  - ⏱️ 10-second delay before actual destruction
+  - 🔒 Can only be triggered manually from GitHub Actions UI
+  - 📝 Logs who triggered the destruction and when
+- **Actions**: 
+  - Verifies confirmation
+  - Previews resources to be destroyed
+  - Destroys all infrastructure in selected stack
+  - Provides destruction summary
 
 ## Component-Based Infrastructure
 
@@ -363,6 +392,9 @@ pytest
 
 - [OIDC_SETUP.md](OIDC_SETUP.md) - AWS OIDC setup for GitHub Actions
 - [SECURITY.md](SECURITY.md) - Security best practices
+- [DEPLOYMENT_WORKFLOW.md](DEPLOYMENT_WORKFLOW.md) - Complete deployment workflow (test → integration tests → production)
+- [IAC_PR_WORKFLOWS.md](IAC_PR_WORKFLOWS.md) - Industry best practices for IaC PR workflows
+- [CONCURRENCY_STRATEGY.md](CONCURRENCY_STRATEGY.md) - Handling multiple PRs and deployments
 - [app/README.md](app/README.md) - FastAPI application documentation
 
 ## License

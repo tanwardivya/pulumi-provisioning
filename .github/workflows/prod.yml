@@ -1,11 +1,22 @@
 name: Deploy to Production Environment
 
 on:
+  # Triggered automatically when test workflow completes successfully
+  # This ensures: test deploy → integration tests → production deploy
+  workflow_run:
+    workflows: ["Deploy to Test Environment"]
+    types:
+      - completed
+    branches:
+      - develop
+      - test
+  # Manual trigger (for emergency deployments or direct to prod)
+  workflow_dispatch:
+  # Push to main/master (for direct production deployments)
   push:
     branches:
       - main
       - master
-  workflow_dispatch:
   release:
     types: [published]
 
@@ -16,14 +27,58 @@ env:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
+    # Only run if:
+    # 1. Manual trigger (workflow_dispatch), OR
+    # 2. Push to main/master, OR
+    # 3. Test workflow completed successfully (workflow_run)
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+
+    # Concurrency Control: Prevent multiple simultaneous deployments
+    # For production, we queue deployments (don't cancel) to ensure all changes are applied
+    # This prevents state conflicts when multiple PRs are merged quickly
+    concurrency:
+      group: deploy-prod-${{ github.ref }}
+      cancel-in-progress: false # Queue deployments (safer for production)
+
     permissions:
       id-token: write
       contents: read
     environment:
       name: production
-      url: https://${{ secrets.DOMAIN_NAME || 'yourdomain.com' }}
+      # Manual approval required - set in GitHub environment settings
+      # Go to: Settings → Environments → production → Required reviewers
+      # URL can be set in GitHub environment settings or use a variable
+      # url: https://yourdomain.com
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+        # For workflow_run triggers, checkout the commit from the triggering workflow
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Deployment Trigger Info
+        run: |
+          echo "=========================================="
+          echo "🚀 Production Deployment Triggered"
+          echo "=========================================="
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            echo "Trigger: Test workflow completed successfully"
+            echo "Test Workflow Run: ${{ github.event.workflow_run.html_url }}"
+            echo "Test Workflow Commit: ${{ github.event.workflow_run.head_sha }}"
+            echo ""
+            echo "✅ Integration tests passed - proceeding to production"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Trigger: Manual dispatch"
+            echo "⚠️  Manual deployment - ensure tests have passed!"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            echo "Trigger: Push to ${{ github.ref_name }}"
+            echo "Commit: ${{ github.sha }}"
+          fi
+          echo "=========================================="
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -33,7 +88,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -161,7 +216,7 @@ jobs:
         run: |
           IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
           AWS_REGION="${{ env.AWS_REGION }}"
-          
+
           echo "Storing image tag in SSM Parameter Store: $IMAGE_TAG"
           aws ssm put-parameter \
             --name /pulumi/prod/image_tag \
@@ -174,26 +229,26 @@ jobs:
             --value "$IMAGE_TAG" \
             --type String \
             --region "$AWS_REGION"
-          
+
           echo "✅ Image tag stored in SSM: /pulumi/prod/image_tag = $IMAGE_TAG"
 
       - name: Wait for EC2 SSM to be Ready
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           AWS_REGION="${{ env.AWS_REGION }}"
-          
+
           if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
             echo "⚠️  EC2 instance not found, skipping SSM wait"
             exit 0
           fi
-          
+
           echo "Waiting for EC2 instance to be ready for SSM: $EC2_INSTANCE_ID"
           echo "This may take 1-2 minutes for new instances..."
-          
+
           MAX_ATTEMPTS=36
           ATTEMPT=0
           SSM_READY=false
-          
+
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
             ATTEMPT=$((ATTEMPT + 1))
             
@@ -234,7 +289,7 @@ jobs:
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS: Instance: $INSTANCE_STATE, SSM Ping: $PING_STATUS"
             sleep 5
           done
-          
+
           if [ "$SSM_READY" = false ]; then
             echo "⚠️  SSM not ready after $MAX_ATTEMPTS attempts (3 minutes)"
             echo "   Instance state: $INSTANCE_STATE"
@@ -252,16 +307,16 @@ jobs:
           AWS_REGION="${{ env.AWS_REGION }}"
           S3_BUCKET="${{ steps.outputs.outputs.s3_bucket }}"
           RDS_ADDRESS="${{ steps.outputs.outputs.rds_address }}"
-          
+
           if [ -z "$EC2_INSTANCE_ID" ] || [ "$EC2_INSTANCE_ID" = "null" ]; then
             echo "⚠️  EC2 instance not found, skipping deployment"
             exit 0
           fi
-          
+
           echo "Deploying new image to EC2 instance: $EC2_INSTANCE_ID"
           echo "Image Tag: $IMAGE_TAG"
           echo "This will update the container without restarting the EC2 instance"
-          
+
           # Build deployment commands using jq (no heredoc to avoid YAML issues)
           SSM_PARAMS=$(jq -n \
             --arg ecr_url "$ECR_REPO_URL" \
@@ -310,7 +365,7 @@ jobs:
                 "echo === Deployment completed ==="
               ]
             }')
-          
+
           # Send command via SSM
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "$EC2_INSTANCE_ID" \
@@ -319,17 +374,17 @@ jobs:
             --region "$AWS_REGION" \
             --output text \
             --query 'Command.CommandId' 2>/dev/null || echo "")
-          
+
           if [ -z "$COMMAND_ID" ]; then
             echo "❌ Could not send SSM command (unexpected error after SSM wait)"
             echo "   Image is in ECR. To deploy manually, SSH to instance and run:"
             echo "   docker pull $ECR_REPO_URL:$IMAGE_TAG && docker stop fastapi-app && docker rm fastapi-app && docker run -d --name fastapi-app --restart unless-stopped -p 8000:8000 -e AWS_REGION=$AWS_REGION -e S3_BUCKET_NAME=$S3_BUCKET -e DB_HOST=$RDS_ADDRESS -e DB_PORT=5432 -e DB_NAME=pulumi_prod_db -e DB_USER=dbadmin -e DB_PASSWORD=\"\$(aws ssm get-parameter --name /pulumi/prod/db_password --with-decryption --query 'Parameter.Value' --output text)\" $ECR_REPO_URL:$IMAGE_TAG"
             exit 1
           fi
-          
+
           echo "Command ID: $COMMAND_ID"
           echo "Waiting for deployment to complete (max 2 minutes)..."
-          
+
           # Wait for command to complete
           STATUS="InProgress"
           for i in {1..24}; do
@@ -366,7 +421,7 @@ jobs:
             
             echo "Status: $STATUS (waiting... $i/24)"
           done
-          
+
           if [ "$STATUS" != "Success" ]; then
             echo "⚠️  Deployment timed out, but image is in ECR"
           fi
@@ -378,9 +433,9 @@ jobs:
           ECR_REPO_NAME="${{ steps.outputs.outputs.ecr_repo_name }}"
           IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
           AWS_REGION="${{ env.AWS_REGION }}"
-          
+
           echo "Checking ECR image details for tag: $IMAGE_TAG"
-          
+
           # Get specific image details
           SPECIFIC_DIGEST=$(aws ecr describe-images \
             --repository-name "$ECR_REPO_NAME" \
@@ -388,17 +443,17 @@ jobs:
             --region "$AWS_REGION" \
             --query 'imageDetails[0].imageDigest' \
             --output text 2>/dev/null || echo "none")
-          
+
           SPECIFIC_PUSHED=$(aws ecr describe-images \
             --repository-name "$ECR_REPO_NAME" \
             --image-ids imageTag=$IMAGE_TAG \
             --region "$AWS_REGION" \
             --query 'imageDetails[0].imagePushedAt' \
             --output text 2>/dev/null || echo "unknown")
-          
+
           echo "image_digest=$SPECIFIC_DIGEST" >> $GITHUB_OUTPUT
           echo "image_pushed=$SPECIFIC_PUSHED" >> $GITHUB_OUTPUT
-          
+
           echo "✅ Image in ECR:"
           echo "   Tag: $IMAGE_TAG"
           echo "   Digest: $SPECIFIC_DIGEST"
@@ -412,7 +467,7 @@ jobs:
           IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
           IMAGE_DIGEST="${{ steps.ecr-info.outputs.image_digest }}"
           IMAGE_PUSHED="${{ steps.ecr-info.outputs.image_pushed }}"
-          
+
           echo "=========================================="
           echo "✅ Production Deployment Complete"
           echo "=========================================="
@@ -446,4 +501,3 @@ jobs:
             sleep 30
             curl -f http://$EC2_IP:8000/health || curl -f https://$EC2_IP/health || echo "⚠️  Health check failed - check manually"
           fi
-
