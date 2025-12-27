@@ -33,10 +33,25 @@ class ItemResponse(BaseModel):
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
+    import os
+    import socket
+    
+    # Get container/host info if available
+    hostname = socket.gethostname()
+    
+    # Try to get image info from environment (if set during deployment)
+    image_tag = os.getenv("IMAGE_TAG", "unknown")
+    container_name = os.getenv("HOSTNAME", hostname)
+    
     return {
         "status": "healthy",
         "app_name": settings.app_name,
-        "version": settings.app_version
+        "version": settings.app_version,
+        "hostname": hostname,
+        "container_name": container_name,
+        "image_tag": image_tag,
+        "aws_region": os.getenv("AWS_REGION", "unknown"),
+        "s3_bucket": os.getenv("S3_BUCKET_NAME", "not configured"),
     }
 
 
