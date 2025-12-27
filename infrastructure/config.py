@@ -45,7 +45,10 @@ def get_config():
         engine=config.get("dbEngine") or "postgres",
         instance_class=config.get("dbInstanceClass") or "db.t3.micro",
         allocated_storage=config.get_int("dbAllocatedStorage") or 20,
+        username=config.get("dbUsername"),  # Optional - defaults to "dbadmin" in component
         multi_az=config.get_bool("dbMultiAz") if config.get("dbMultiAz") else False,
+        backup_retention_period=config.get_int("dbBackupRetentionPeriod") if config.get("dbBackupRetentionPeriod") else 0,  # 0 for free tier compatibility
+        skip_final_snapshot=config.get_bool("dbSkipFinalSnapshot") if config.get("dbSkipFinalSnapshot") else True,  # True for free tier
         tags=base_tags,
     )
     
