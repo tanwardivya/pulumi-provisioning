@@ -90,29 +90,17 @@ class IAMComponent(BaseComponent):
                             "Resource": [ecr_resource.strip()],
                         })
             
-            # SSM access policy (for Systems Manager to manage EC2 instance)
-            # Required for SSM send-command to work
-            policy_statements.append({
-                "Effect": "Allow",
-                "Action": [
-                    "ssm:UpdateInstanceInformation",
-                    "ssmmessages:CreateControlChannel",
-                    "ssmmessages:CreateDataChannel",
-                    "ssmmessages:OpenControlChannel",
-                    "ssmmessages:OpenDataChannel",
-                ],
-                "Resource": "*",
-            })
-            
-            # SSM Parameter Store access (for retrieving secrets like DB password and image tags)
+            # SSM Parameter Store access (for DB password and other secrets)
             policy_statements.append({
                 "Effect": "Allow",
                 "Action": [
                     "ssm:GetParameter",
                     "ssm:GetParameters",
-                    "ssm:GetParametersByPath",
+                    "ssm:DescribeParameters",
                 ],
-                "Resource": "arn:aws:ssm:*:*:parameter/pulumi/*",
+                "Resource": [
+                    "arn:aws:ssm:*:*:parameter/pulumi/*"
+                ],
             })
             
             # Build policy document
