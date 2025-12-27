@@ -35,33 +35,57 @@ class IAMComponent(BaseComponent):
             if s3_arns:
                 s3_resources = []
                 for _ in s3_arns:
+                    if arn_index >= len(resolved_arns):
+                        break  # Safety check to prevent IndexError
                     bucket_arn = resolved_arns[arn_index]
                     s3_resources.append(bucket_arn)
                     s3_resources.append(f"{bucket_arn}/*")
                     arn_index += 1
                 
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "s3:GetObject",
-                        "s3:PutObject",
-                        "s3:DeleteObject",
-                        "s3:ListBucket",
-                    ],
-                    "Resource": s3_resources,
-                })
+                if s3_resources:
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "s3:GetObject",
+                            "s3:PutObject",
+                            "s3:DeleteObject",
+                            "s3:ListBucket",
+                        ],
+                        "Resource": s3_resources,
+                    })
             
             # RDS access policy (for connection, not direct RDS management)
+            # For rds-db:connect, we need: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-user-name
+            # The passed ARN is: arn:aws:rds:region:account-id:db:instance-id
+            # We need to convert it to rds-db format
             if rds_arn:
-                rds_resource = resolved_arns[arn_index]
-                policy_statements.append({
-                    "Effect": "Allow",
-                    "Action": [
-                        "rds-db:connect",
-                    ],
-                    "Resource": rds_resource,
-                })
-                arn_index += 1
+                if arn_index >= len(resolved_arns):
+                    # Safety check: if index is out of range, skip RDS policy
+                    pass
+                else:
+                    instance_arn = resolved_arns[arn_index]
+                    # Convert RDS instance ARN to rds-db:connect ARN format
+                    # Format: arn:aws:rds:region:account-id:db:instance-id -> arn:aws:rds-db:region:account-id:dbuser:instance-id/username
+                    arn_parts = instance_arn.split(":")
+                    if len(arn_parts) >= 7 and arn_parts[2] == "rds":
+                        region = arn_parts[3]
+                        account_id = arn_parts[4]
+                        instance_id = arn_parts[6]  # Instance ID is after 'db:'
+                        # Use default username 'dbadmin' (can be made configurable if needed)
+                        username = "dbadmin"
+                        rds_db_arn = f"arn:aws:rds-db:{region}:{account_id}:dbuser:{instance_id}/{username}"
+                    else:
+                        # Fallback: use wildcard if ARN format is unexpected
+                        rds_db_arn = "arn:aws:rds-db:*:*:dbuser:*/dbadmin"
+                    
+                    policy_statements.append({
+                        "Effect": "Allow",
+                        "Action": [
+                            "rds-db:connect",
+                        ],
+                        "Resource": rds_db_arn,
+                    })
+                    arn_index += 1
             
             # ECR access policy (for pulling images)
             if ecr_arn:

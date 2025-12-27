@@ -44,35 +44,14 @@ rds = RDSComponent(
 )
 
 # Create IAM role for EC2
-# For rds-db:connect, we need the resource identifier in format: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-user-name
-# We'll construct this from the RDS instance ARN and resource ID
-def build_rds_db_user_arn(args):
-    """Build RDS DB user ARN for IAM rds-db:connect permission."""
-    resource_id = args[0]  # DB instance resource ID (e.g., db-SY4U4OVG7NPSO6QCOVM4G56B4E)
-    instance_arn = args[1]  # Full RDS instance ARN
-    username = config["rds"].username or "dbadmin"
-    # Parse instance ARN: arn:aws:rds:region:account-id:db:instance-id
-    # Extract region and account-id
-    arn_parts = instance_arn.split(":")
-    if len(arn_parts) >= 5:
-        region = arn_parts[3]
-        account_id = arn_parts[4]
-        # Construct rds-db ARN: arn:aws:rds-db:region:account-id:dbuser:resource-id/username
-        return f"arn:aws:rds-db:{region}:{account_id}:dbuser:{resource_id}/{username}"
-    # Fallback: return instance ARN if parsing fails (shouldn't happen)
-    return instance_arn
-
-# Get RDS resource ID and ARN to build the rds-db:connect ARN
-rds_db_user_arn = pulumi.Output.all(
-    rds.db_instance.id,  # This is the resource identifier
-    rds.db_instance.arn
-).apply(build_rds_db_user_arn)
-
+# Pass RDS instance ARN directly - the IAM component will handle rds-db:connect ARN construction if needed
+# For rds-db:connect, we need: arn:aws:rds-db:region:account-id:dbuser:db-instance-id/db-user-name
+# But we'll pass the instance ARN and let IAM component construct it, or use a simpler approach
 iam = IAMComponent(
     f"{stack}-iam",
     config["iam"],
     s3_bucket_arns=[s3.bucket_arn],
-    rds_instance_arn=rds_db_user_arn,
+    rds_instance_arn=rds.db_instance.arn,  # Pass instance ARN directly - IAM will handle rds-db format
     ecr_repository_arn=ecr.repository_arn
 )
 
