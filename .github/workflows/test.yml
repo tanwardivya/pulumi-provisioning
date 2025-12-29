@@ -141,21 +141,61 @@ jobs:
         # For pull_request events, checkout the merge commit (not the PR branch)
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          fetch-depth: 0  # Fetch full history to check all commits
 
       - name: Check if Deployment Should Be Skipped
         id: check-skip
         run: |
           # Check commit message for skip flags
-          COMMIT_MSG=$(git log -1 --pretty=%B ${{ github.sha }} || echo "")
+          # For PR merges, check merge commit, head commit, and all commits in PR
+          # For workflow_dispatch, check the current commit
+          
+          # Get merge commit message (if PR merge)
+          MERGE_COMMIT_MSG=""
+          if [ -n "${{ github.event.pull_request.merge_commit_sha }}" ]; then
+            MERGE_COMMIT_MSG=$(git log -1 --pretty=%B ${{ github.event.pull_request.merge_commit_sha }} 2>/dev/null || echo "")
+          fi
+          
+          # Get current HEAD commit message
+          HEAD_COMMIT_MSG=$(git log -1 --pretty=%B HEAD 2>/dev/null || echo "")
+          
+          # Get PR title and body (available even after merge)
           PR_TITLE="${{ github.event.pull_request.title || '' }}"
-
-          if echo "$COMMIT_MSG $PR_TITLE" | grep -qiE "\[skip-deploy\]|\[no-deploy\]|\[skip.*deploy\]"; then
+          PR_BODY="${{ github.event.pull_request.body || '' }}"
+          
+          # For PR merges, also check all commits in the PR
+          PR_COMMITS_MSG=""
+          if [ -n "${{ github.event.pull_request.base.sha }}" ] && [ -n "${{ github.event.pull_request.head.sha }}" ]; then
+            PR_COMMITS_MSG=$(git log --pretty=%B ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }} 2>/dev/null || echo "")
+          fi
+          
+          # Combine all sources to check
+          ALL_TEXT="$MERGE_COMMIT_MSG $HEAD_COMMIT_MSG $PR_TITLE $PR_BODY $PR_COMMITS_MSG"
+          
+          echo "=========================================="
+          echo "Checking for [skip-deploy] flag..."
+          echo "=========================================="
+          echo "Event: ${{ github.event_name }}"
+          echo "SHA: ${{ github.sha }}"
+          echo "Merge commit SHA: ${{ github.event.pull_request.merge_commit_sha || 'N/A' }}"
+          echo ""
+          echo "Merge commit message:"
+          echo "$MERGE_COMMIT_MSG" | head -3
+          echo ""
+          echo "Head commit message:"
+          echo "$HEAD_COMMIT_MSG" | head -3
+          echo ""
+          echo "PR title: $PR_TITLE"
+          echo "PR body: $PR_BODY" | head -3
+          echo ""
+          echo "PR commits messages:"
+          echo "$PR_COMMITS_MSG" | head -5
+          echo "=========================================="
+          
+          if echo "$ALL_TEXT" | grep -qiE "\[skip-deploy\]|\[no-deploy\]|\[skip.*deploy\]"; then
             echo "skip_deploy=true" >> $GITHUB_OUTPUT
-            echo "⏭️  Deployment skipped due to [skip-deploy] flag in commit message or PR title"
-            echo "   Commit message: $COMMIT_MSG"
-            echo "   PR title: $PR_TITLE"
             echo ""
-            echo "💡 To deploy manually, use: workflow_dispatch or remove [skip-deploy] flag"
+            echo "⏭️  FOUND [skip-deploy] flag - Deployment will be SKIPPED"
             echo ""
             echo "=========================================="
             echo "⏭️  SKIPPING DEPLOYMENT"
@@ -165,10 +205,12 @@ jobs:
             echo "  - Planning to destroy resources"
             echo "  - Making documentation-only changes"
             echo "  - Testing preview without deploying"
+            echo ""
+            echo "💡 To deploy manually, use: workflow_dispatch or remove [skip-deploy] flag"
             echo "=========================================="
           else
             echo "skip_deploy=false" >> $GITHUB_OUTPUT
-            echo "✅ Deployment will proceed"
+            echo "✅ No [skip-deploy] flag found - deployment will proceed"
           fi
 
       - name: Deployment Status
