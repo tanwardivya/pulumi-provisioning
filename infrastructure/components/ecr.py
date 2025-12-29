@@ -13,6 +13,8 @@ class ECRComponent(BaseComponent):
         super().__init__(name, "custom:components:ECR", opts)
         
         # Create ECR repository
+        # force_delete=True allows deletion even when repository contains images
+        # This is useful for cleanup/destroy operations
         self.repository = aws.ecr.Repository(
             f"{name}-repo",
             name=config.repository_name,
@@ -23,6 +25,7 @@ class ECRComponent(BaseComponent):
             encryption_configurations=[aws.ecr.RepositoryEncryptionConfigurationArgs(
                 encryption_type=config.encryption_type
             )],
+            force_delete=True,  # Allow deletion even when repository contains images
             tags=config.tags or {},
             opts=pulumi.ResourceOptions(parent=self)
         )
