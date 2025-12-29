@@ -143,7 +143,11 @@ class IAMComponent(BaseComponent):
                 f"{name}-policy",
                 role=self.role.id,
                 policy=policy_json,
-                opts=pulumi.ResourceOptions(parent=self)
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    # Inline policy must be deleted before role
+                    delete_before_replace=True
+                )
             )
         else:
             self.policy = None
@@ -154,7 +158,11 @@ class IAMComponent(BaseComponent):
                 f"{name}-ecr-policy",
                 role=self.role.id,
                 policy_arn="arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly",
-                opts=pulumi.ResourceOptions(parent=self)
+                opts=pulumi.ResourceOptions(
+                    parent=self,
+                    # Policy attachment must be deleted before role
+                    delete_before_replace=True
+                )
             )
         
         # Attach SSM managed instance core policy (required for SSM agent to register)
@@ -162,7 +170,11 @@ class IAMComponent(BaseComponent):
             f"{name}-ssm-policy",
             role=self.role.id,
             policy_arn="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
-            opts=pulumi.ResourceOptions(parent=self)
+            opts=pulumi.ResourceOptions(
+                parent=self,
+                # Policy attachment must be deleted before role
+                delete_before_replace=True
+            )
         )
         
         # Attach additional managed policies if provided
@@ -172,15 +184,23 @@ class IAMComponent(BaseComponent):
                     f"{name}-policy-attach-{i}",
                     role=self.role.id,
                     policy_arn=policy_arn,
-                    opts=pulumi.ResourceOptions(parent=self)
+                    opts=pulumi.ResourceOptions(
+                        parent=self,
+                        delete_before_replace=True
+                    )
                 )
         
         # Create instance profile
+        # Instance profile must be deleted before the role
         self.instance_profile = aws.iam.InstanceProfile(
             f"{name}-instance-profile",
             role=self.role.name,
             tags=config.tags or {},
-            opts=pulumi.ResourceOptions(parent=self)
+            opts=pulumi.ResourceOptions(
+                parent=self,
+                # Instance profile must be deleted before role
+                delete_before_replace=True
+            )
         )
         
         # Register outputs

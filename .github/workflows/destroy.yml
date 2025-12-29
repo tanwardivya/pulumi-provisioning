@@ -161,6 +161,80 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
           AWS_REGION: ${{ env.AWS_REGION }}
 
+      - name: Clean up IAM Policies (if role exists)
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          echo "Cleaning up IAM policies before destroy..."
+
+          # IAM role name follows pattern: pulumi-{stack}-ec2-role
+          # Instance profile name follows pattern: {stack}-iam-instance-profile
+          STACK="${{ github.event.inputs.stack }}"
+          IAM_ROLE_NAME="pulumi-${STACK}-ec2-role"
+          INSTANCE_PROFILE_NAME="${STACK}-iam-instance-profile"
+
+          echo "Looking for IAM role: $IAM_ROLE_NAME"
+
+          # Check if role exists
+          if aws iam get-role --role-name "$IAM_ROLE_NAME" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "Found IAM role: $IAM_ROLE_NAME"
+            echo "Detaching policies from role..."
+            
+            # Detach managed policies
+            MANAGED_POLICIES=$(aws iam list-attached-role-policies \
+              --role-name "$IAM_ROLE_NAME" \
+              --query 'AttachedPolicies[*].PolicyArn' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$MANAGED_POLICIES" ] && [ "$MANAGED_POLICIES" != "None" ] && [ "$MANAGED_POLICIES" != "" ]; then
+              for policy_arn in $MANAGED_POLICIES; do
+                if [ "$policy_arn" != "None" ] && [ -n "$policy_arn" ] && [ "$policy_arn" != "" ]; then
+                  echo "Detaching policy: $policy_arn"
+                  aws iam detach-role-policy \
+                    --role-name "$IAM_ROLE_NAME" \
+                    --policy-arn "$policy_arn" 2>/dev/null || true
+                fi
+              done
+            fi
+            
+            # Delete inline policies
+            INLINE_POLICIES=$(aws iam list-role-policies \
+              --role-name "$IAM_ROLE_NAME" \
+              --query 'PolicyNames[*]' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$INLINE_POLICIES" ] && [ "$INLINE_POLICIES" != "None" ] && [ "$INLINE_POLICIES" != "" ]; then
+              for policy_name in $INLINE_POLICIES; do
+                if [ "$policy_name" != "None" ] && [ -n "$policy_name" ] && [ "$policy_name" != "" ]; then
+                  echo "Deleting inline policy: $policy_name"
+                  aws iam delete-role-policy \
+                    --role-name "$IAM_ROLE_NAME" \
+                    --policy-name "$policy_name" 2>/dev/null || true
+                fi
+              done
+            fi
+            
+            # Delete instance profile if it exists
+            if aws iam get-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
+              echo "Removing role from instance profile: $INSTANCE_PROFILE_NAME"
+              aws iam remove-role-from-instance-profile \
+                --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+                --role-name "$IAM_ROLE_NAME" 2>/dev/null || true
+              
+              echo "Deleting instance profile: $INSTANCE_PROFILE_NAME"
+              aws iam delete-instance-profile \
+                --instance-profile-name "$INSTANCE_PROFILE_NAME" 2>/dev/null || true
+            fi
+            
+            echo "✅ IAM policies cleaned up"
+          else
+            echo "ℹ️  IAM role not found: $IAM_ROLE_NAME (may already be deleted)"
+          fi
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+          AWS_REGION: ${{ env.AWS_REGION }}
+
       - name: Final Warning Before Destruction
         run: |
           echo "=========================================="
