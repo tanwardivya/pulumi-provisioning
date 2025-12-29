@@ -190,16 +190,28 @@ jobs:
           source .venv/bin/activate
           echo "Cleaning up IAM policies before destroy..."
 
-          # IAM role name follows pattern: pulumi-{stack}-ec2-role
-          # Instance profile name follows pattern: {stack}-iam-instance-profile
+          # IAM role name pattern: {stack}-iam-role-{random} (Pulumi adds random suffix)
+          # Also check for: pulumi-{stack}-ec2-role pattern
           STACK="${{ github.event.inputs.stack }}"
-          IAM_ROLE_NAME="pulumi-${STACK}-ec2-role"
-          INSTANCE_PROFILE_NAME="${STACK}-iam-instance-profile"
 
-          echo "Looking for IAM role: $IAM_ROLE_NAME"
+          echo "Searching for IAM roles matching patterns:"
+          echo "  - ${STACK}-iam-role-*"
+          echo "  - pulumi-${STACK}-ec2-role*"
 
-          # Check if role exists
-          if aws iam get-role --role-name "$IAM_ROLE_NAME" --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+          # Find all roles matching the pattern
+          ROLE_NAMES=$(aws iam list-roles \
+            --query "Roles[?starts_with(RoleName, '${STACK}-iam-role') || starts_with(RoleName, 'pulumi-${STACK}-ec2-role')].RoleName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$ROLE_NAMES" ] && [ "$ROLE_NAMES" != "None" ] && [ "$ROLE_NAMES" != "" ]; then
+            # Process each role found
+            for IAM_ROLE_NAME in $ROLE_NAMES; do
+              if [ "$IAM_ROLE_NAME" != "None" ] && [ -n "$IAM_ROLE_NAME" ] && [ "$IAM_ROLE_NAME" != "" ]; then
+                echo ""
+                echo "Processing IAM role: $IAM_ROLE_NAME"
+                
+                # Check if role exists (double-check)
+                if aws iam get-role --role-name "$IAM_ROLE_NAME" >/dev/null 2>&1; then
             echo "Found IAM role: $IAM_ROLE_NAME"
             echo "Detaching policies from role..."
             
@@ -237,21 +249,38 @@ jobs:
               done
             fi
             
-            # Delete instance profile if it exists
-            if aws iam get-instance-profile --instance-profile-name "$INSTANCE_PROFILE_NAME" >/dev/null 2>&1; then
-              echo "Removing role from instance profile: $INSTANCE_PROFILE_NAME"
-              aws iam remove-role-from-instance-profile \
-                --instance-profile-name "$INSTANCE_PROFILE_NAME" \
-                --role-name "$IAM_ROLE_NAME" 2>/dev/null || true
-              
-              echo "Deleting instance profile: $INSTANCE_PROFILE_NAME"
-              aws iam delete-instance-profile \
-                --instance-profile-name "$INSTANCE_PROFILE_NAME" 2>/dev/null || true
+            # Find and delete instance profiles associated with this role
+            # Instance profile name pattern: {stack}-iam-instance-profile-{random}
+            INSTANCE_PROFILES=$(aws iam list-instance-profiles-for-role \
+              --role-name "$IAM_ROLE_NAME" \
+              --query 'InstanceProfiles[*].InstanceProfileName' \
+              --output text 2>/dev/null || echo "")
+            
+            if [ -n "$INSTANCE_PROFILES" ] && [ "$INSTANCE_PROFILES" != "None" ] && [ "$INSTANCE_PROFILES" != "" ]; then
+              for INSTANCE_PROFILE_NAME in $INSTANCE_PROFILES; do
+                if [ "$INSTANCE_PROFILE_NAME" != "None" ] && [ -n "$INSTANCE_PROFILE_NAME" ] && [ "$INSTANCE_PROFILE_NAME" != "" ]; then
+                  echo "Removing role from instance profile: $INSTANCE_PROFILE_NAME"
+                  aws iam remove-role-from-instance-profile \
+                    --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+                    --role-name "$IAM_ROLE_NAME" 2>/dev/null || true
+                  
+                  echo "Deleting instance profile: $INSTANCE_PROFILE_NAME"
+                  aws iam delete-instance-profile \
+                    --instance-profile-name "$INSTANCE_PROFILE_NAME" 2>/dev/null || true
+                fi
+              done
             fi
             
-            echo "✅ IAM policies cleaned up"
+                  echo "✅ IAM policies cleaned up for role: $IAM_ROLE_NAME"
+                else
+                  echo "ℹ️  Role not accessible: $IAM_ROLE_NAME"
+                fi
+              fi
+            done
+            echo ""
+            echo "✅ IAM cleanup completed for all matching roles"
           else
-            echo "ℹ️  IAM role not found: $IAM_ROLE_NAME (may already be deleted)"
+            echo "ℹ️  No IAM roles found matching patterns (may already be deleted)"
           fi
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
