@@ -136,6 +136,12 @@ jobs:
     permissions:
       id-token: write
       contents: read
+    
+    environment:
+      name: test
+      # Manual approval required - set in GitHub environment settings
+      # Go to: Settings → Environments → test → Required reviewers
+      # Add reviewers who can approve test deployments
     steps:
       - uses: actions/checkout@v4
         # For pull_request events, checkout the merge commit (not the PR branch)
