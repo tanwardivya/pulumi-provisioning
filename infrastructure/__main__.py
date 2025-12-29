@@ -210,16 +210,19 @@ echo "Getting image tag from SSM Parameter Store..."
 SPECIFIC_TAG=$(aws ssm get-parameter --name /pulumi/{stack_name}/image_tag --query 'Parameter.Value' --output text --region $AWS_REGION 2>/dev/null || echo "")
 
 # Pull image from ECR (try specific tag first, then fallback)
+# Note: On first infrastructure creation, image may not exist yet
+# The CI/CD pipeline will build and push the image, then deploy via SSM
+# This script will keep retrying for up to 10 minutes to allow time for first deployment
 echo "Pulling Docker image from ECR..."
 IMAGE_PULLED=false
-MAX_RETRIES=10
+MAX_RETRIES=20  # Increased from 10 to 20 (10 minutes total)
 RETRY_DELAY=30
 
 for attempt in $(seq 1 $MAX_RETRIES); do
     echo "Attempt $attempt/$MAX_RETRIES to pull image..."
     
     # Try specific tag first if available
-    if [ -n "$SPECIFIC_TAG" ]; then
+    if [ -n "$SPECIFIC_TAG" ] && [ "$SPECIFIC_TAG" != "None" ] && [ "$SPECIFIC_TAG" != "null" ]; then
         echo "Trying specific tag from SSM: $SPECIFIC_TAG"
         if docker pull {args[0]}:$SPECIFIC_TAG 2>/dev/null; then
             echo "Successfully pulled image with specific tag: $SPECIFIC_TAG"
@@ -232,6 +235,7 @@ for attempt in $(seq 1 $MAX_RETRIES); do
     
     # Fallback to latest, test, main
     for tag in latest test main; do
+        echo "Trying fallback tag: $tag"
         if docker pull {args[0]}:$tag 2>/dev/null; then
             echo "Successfully pulled image with fallback tag: $tag"
             IMAGE_TAG=$tag
@@ -242,16 +246,24 @@ for attempt in $(seq 1 $MAX_RETRIES); do
     
     if [ "$IMAGE_PULLED" = false ]; then
         if [ $attempt -lt $MAX_RETRIES ]; then
-            echo "Image not available yet, waiting $RETRY_DELAY seconds before retry..."
+            echo "Image not available yet (this is normal on first deployment)"
+            echo "Waiting $RETRY_DELAY seconds before retry... ($attempt/$MAX_RETRIES)"
+            echo "The CI/CD pipeline will build and push the image, then deploy via SSM"
             sleep $RETRY_DELAY
         fi
     fi
 done
 
 if [ "$IMAGE_PULLED" = false ]; then
-    echo "WARNING: Failed to pull image from ECR after $MAX_RETRIES attempts"
-    echo "Container will not start. Image will be pulled on next deployment."
-    echo "Deployments are handled automatically by CI/CD pipeline."
+    echo "WARNING: Failed to pull image from ECR after $MAX_RETRIES attempts (10 minutes)"
+    echo "This is expected on first infrastructure creation."
+    echo "The CI/CD pipeline will:"
+    echo "  1. Build and push the Docker image to ECR"
+    echo "  2. Deploy the container to this EC2 instance via SSM"
+    echo "The container will start automatically after the first deployment completes."
+    echo ""
+    echo "To check deployment status, wait for the GitHub Actions workflow to complete."
+    echo "Or manually trigger deployment by running the workflow."
 else
     # Run FastAPI container
     echo "Starting FastAPI container with image tag: $IMAGE_TAG"
