@@ -136,7 +136,7 @@ jobs:
     permissions:
       id-token: write
       contents: read
-    
+
     environment:
       name: test
       # Manual approval required - set in GitHub environment settings
