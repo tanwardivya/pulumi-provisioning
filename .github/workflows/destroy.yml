@@ -79,6 +79,29 @@ jobs:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
+      - name: Check and Cancel In-Progress Operations
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          echo "Checking for in-progress Pulumi operations..."
+
+          # Try to get stack info - if there's a conflict, we'll see it
+          # Attempt to cancel any in-progress operations
+          echo "Attempting to cancel any in-progress operations..."
+          if pulumi cancel --stack ${{ github.event.inputs.stack }} 2>&1; then
+            echo "✅ Cancelled in-progress operation"
+            # Wait for cancellation to complete
+            echo "Waiting 15 seconds for cancellation to complete..."
+            sleep 15
+          else
+            echo "ℹ️  No in-progress operation found (or already completed)"
+          fi
+
+          echo "✅ Ready to proceed with destroy"
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
       - name: Set Pulumi Config from GitHub Secrets
         working-directory: infrastructure
         run: |
@@ -266,11 +289,69 @@ jobs:
           echo "=========================================="
           echo "Stack: ${{ github.event.inputs.stack }}"
           echo ""
-          pulumi destroy --yes --stack ${{ github.event.inputs.stack }}
-          echo ""
-          echo "=========================================="
-          echo "✅ Destruction Complete"
-          echo "=========================================="
+
+          # Retry logic for update conflicts
+          MAX_RETRIES=3
+          RETRY_COUNT=0
+          DESTROY_SUCCESS=false
+
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            RETRY_COUNT=$((RETRY_COUNT + 1))
+            echo "Destroy attempt $RETRY_COUNT/$MAX_RETRIES..."
+            
+            # Capture output to check for specific errors
+            DESTROY_OUTPUT=$(pulumi destroy --yes --stack ${{ github.event.inputs.stack }} 2>&1) || {
+              EXIT_CODE=$?
+              
+              # Check if it's an update conflict
+              if echo "$DESTROY_OUTPUT" | grep -q "Another update is currently in progress"; then
+                echo "⚠️  Update conflict detected:"
+                echo "$DESTROY_OUTPUT" | grep -A 2 "Another update"
+                echo ""
+                echo "Waiting 30 seconds and attempting to cancel conflicting operation..."
+                sleep 30
+                
+                # Try to cancel the conflicting operation
+                echo "Attempting to cancel conflicting operation..."
+                pulumi cancel --stack ${{ github.event.inputs.stack }} 2>/dev/null || true
+                sleep 15
+                
+                # Continue to next retry
+                continue
+              else
+                # Other error - show output and exit
+                echo "❌ Destroy failed:"
+                echo "$DESTROY_OUTPUT"
+                exit $EXIT_CODE
+              fi
+            }
+            
+            # Success
+            echo "$DESTROY_OUTPUT"
+            DESTROY_SUCCESS=true
+            break
+          done
+
+          if [ "$DESTROY_SUCCESS" = "true" ]; then
+            echo ""
+            echo "=========================================="
+            echo "✅ Destruction Complete"
+            echo "=========================================="
+          else
+            echo ""
+            echo "=========================================="
+            echo "❌ Destruction Failed After $MAX_RETRIES Attempts"
+            echo "=========================================="
+            echo "Another Pulumi operation is still in progress."
+            echo ""
+            echo "To resolve:"
+            echo "  1. Go to Pulumi Cloud: https://app.pulumi.com"
+            echo "  2. Navigate to your stack: pulumi-provisioning/${{ github.event.inputs.stack }}"
+            echo "  3. Check for in-progress operations and cancel them if needed"
+            echo "  4. Wait a few minutes for operations to complete"
+            echo "  5. Retry the destroy workflow"
+            exit 1
+          fi
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
@@ -304,10 +385,17 @@ jobs:
             echo "Check the logs above for errors."
             echo ""
             echo "Common issues:"
+            echo "  - Another Pulumi operation in progress (update conflict)"
             echo "  - RDS final snapshot creation failed"
             echo "  - S3 bucket not empty"
             echo "  - ECR repository has images"
             echo "  - IAM role dependencies"
+            echo ""
+            echo "If you see 'Another update is currently in progress':"
+            echo "  1. Check Pulumi Cloud for in-progress operations"
+            echo "  2. Wait a few minutes for the operation to complete"
+            echo "  3. Or cancel the operation manually in Pulumi Cloud"
+            echo "  4. Then retry the destroy workflow"
             echo ""
             echo "You may need to manually clean up remaining resources."
           fi
