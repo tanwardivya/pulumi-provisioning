@@ -129,6 +129,10 @@ jobs:
       group: deploy-test-${{ github.ref }}
       cancel-in-progress: true # Latest deployment wins (recommended for test env)
 
+    outputs:
+      deployment_skipped: ${{ steps.deployment-status.outputs.deployment_skipped }}
+      deployment_completed: ${{ steps.deployment-status.outputs.deployment_completed }}
+
     permissions:
       id-token: write
       contents: read
@@ -138,7 +142,37 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
 
+      - name: Check if Deployment Should Be Skipped
+        id: check-skip
+        run: |
+          # Check commit message for skip flags
+          COMMIT_MSG=$(git log -1 --pretty=%B ${{ github.sha }} || echo "")
+          PR_TITLE="${{ github.event.pull_request.title || '' }}"
+
+          if echo "$COMMIT_MSG $PR_TITLE" | grep -qiE "\[skip-deploy\]|\[no-deploy\]|\[skip.*deploy\]"; then
+            echo "skip_deploy=true" >> $GITHUB_OUTPUT
+            echo "⏭️  Deployment skipped due to [skip-deploy] flag in commit message or PR title"
+            echo "   Commit message: $COMMIT_MSG"
+            echo "   PR title: $PR_TITLE"
+            echo ""
+            echo "💡 To deploy manually, use: workflow_dispatch or remove [skip-deploy] flag"
+            echo ""
+            echo "=========================================="
+            echo "⏭️  SKIPPING DEPLOYMENT"
+            echo "=========================================="
+            echo "All deployment steps will be skipped."
+            echo "This is useful when:"
+            echo "  - Planning to destroy resources"
+            echo "  - Making documentation-only changes"
+            echo "  - Testing preview without deploying"
+            echo "=========================================="
+          else
+            echo "skip_deploy=false" >> $GITHUB_OUTPUT
+            echo "✅ Deployment will proceed"
+          fi
+
       - name: Deployment Status
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         run: |
           echo "=========================================="
           echo "🚀 Starting Infrastructure Deployment"
@@ -151,6 +185,8 @@ jobs:
           echo "ℹ️  Note: Only one deployment runs at a time"
           echo "   If another deployment is running, this will cancel it"
           echo "   (latest deployment wins for test environment)"
+          echo ""
+          echo "💡 To skip deployment, add [skip-deploy] to commit message or PR title"
           echo "=========================================="
 
       - name: Install uv
@@ -171,6 +207,7 @@ jobs:
           uv pip install -e ".[dev]"
 
       - name: Configure AWS credentials
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           # Use test role (AdministratorAccess OK for test/dev)
@@ -179,11 +216,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Pulumi
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         uses: pulumi/actions@v4
         with:
           pulumi-version: latest
 
       - name: Select Pulumi Stack
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         working-directory: infrastructure
         run: |
           source .venv/bin/activate
@@ -193,6 +232,7 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Set Pulumi Config from GitHub Secrets
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         working-directory: infrastructure
         run: |
           source .venv/bin/activate
@@ -210,6 +250,7 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Generate Image Tag
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: image-tag
         run: |
           IMAGE_TAG="${GITHUB_SHA::8}"
@@ -217,6 +258,7 @@ jobs:
           echo "Generated image tag: $IMAGE_TAG"
 
       - name: Pulumi Up (Create/Update Infrastructure)
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         working-directory: infrastructure
         run: |
           source .venv/bin/activate
@@ -228,6 +270,7 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Get Pulumi outputs
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: outputs
         working-directory: infrastructure
         run: |
@@ -251,6 +294,7 @@ jobs:
           PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
 
       - name: Get Current Deployed Image Tag from SSM
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: current-image
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
@@ -271,6 +315,7 @@ jobs:
           fi
 
       - name: Check if Docker-relevant files changed
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: check-docker-files
         run: |
           # Check if files that affect Docker build have changed
@@ -319,13 +364,13 @@ jobs:
           fi
 
       - name: Login to Amazon ECR
+        if: steps.check-skip.outputs.skip_deploy != 'true' && steps.check-docker-files.outputs.docker_files_changed == 'true'
         id: login-ecr
-        if: steps.check-docker-files.outputs.docker_files_changed == 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and Push Image (if Docker files changed)
+        if: steps.check-skip.outputs.skip_deploy != 'true' && steps.check-docker-files.outputs.docker_files_changed == 'true'
         id: build-push-image
-        if: steps.check-docker-files.outputs.docker_files_changed == 'true'
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           ECR_REPOSITORY: ${{ steps.outputs.outputs.ecr_repo_name }}
@@ -347,6 +392,7 @@ jobs:
           echo "✅ Image built and pushed successfully with tag: $IMAGE_TAG"
 
       - name: Determine if Deployment is Needed
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: check-changes
         run: |
           # If Docker files didn't change, we can skip everything without building
@@ -362,7 +408,7 @@ jobs:
           echo "deploy_needed=true" >> $GITHUB_OUTPUT
 
       - name: Store Image Tag in SSM Parameter Store (if changed)
-        if: steps.check-changes.outputs.deploy_needed == 'true'
+        if: steps.check-skip.outputs.skip_deploy != 'true' && steps.check-changes.outputs.deploy_needed == 'true'
         run: |
           IMAGE_TAG="${{ steps.image-tag.outputs.image_tag }}"
           AWS_REGION="${{ env.AWS_REGION }}"
@@ -383,7 +429,7 @@ jobs:
           echo "✅ Image tag stored in SSM: /pulumi/test/image_tag = $IMAGE_TAG"
 
       - name: Wait for EC2 SSM to be Ready
-        if: steps.check-changes.outputs.deploy_needed == 'true'
+        if: steps.check-skip.outputs.skip_deploy != 'true' && steps.check-changes.outputs.deploy_needed == 'true'
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           AWS_REGION="${{ env.AWS_REGION }}"
@@ -451,7 +497,7 @@ jobs:
           fi
 
       - name: Deploy to EC2 - Update Container
-        if: steps.check-changes.outputs.deploy_needed == 'true'
+        if: steps.check-skip.outputs.skip_deploy != 'true' && steps.check-changes.outputs.deploy_needed == 'true'
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
@@ -579,6 +625,7 @@ jobs:
           fi
 
       - name: Check ECR Image Details
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         id: ecr-info
         run: |
           ECR_REPO_URL="${{ steps.outputs.outputs.ecr_repo_url }}"
@@ -612,6 +659,7 @@ jobs:
           echo "   Pushed: $SPECIFIC_PUSHED"
 
       - name: Deployment Info
+        if: steps.check-skip.outputs.skip_deploy != 'true'
         run: |
           EC2_INSTANCE_ID="${{ steps.outputs.outputs.ec2_instance_id }}"
           EC2_IP="${{ steps.outputs.outputs.ec2_ip }}"
@@ -646,14 +694,27 @@ jobs:
           echo "  curl http://$EC2_IP:8000/health"
           echo "=========================================="
 
+      - name: Set Deployment Status
+        id: deployment-status
+        run: |
+          if [ "${{ steps.check-skip.outputs.skip_deploy }}" = "true" ]; then
+            echo "deployment_skipped=true" >> $GITHUB_OUTPUT
+            echo "deployment_completed=false" >> $GITHUB_OUTPUT
+          else
+            echo "deployment_skipped=false" >> $GITHUB_OUTPUT
+            echo "deployment_completed=true" >> $GITHUB_OUTPUT
+          fi
+
   integration-tests:
     # Integration tests run after successful deployment to test environment
     # Tests the FastAPI service endpoints to ensure everything works
     # Only runs after PR merge (when deploy job runs), not on PR previews
     # If tests pass, this workflow will trigger production deployment
+    # Skip if deployment was skipped
     if: |
-      (github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
-      github.event_name == 'workflow_dispatch'
+      ((github.event_name == 'pull_request' && github.event.pull_request.merged == true) ||
+      github.event_name == 'workflow_dispatch') &&
+      needs.deploy.outputs.deployment_skipped != 'true'
     needs: deploy
     runs-on: ubuntu-latest
     permissions:
