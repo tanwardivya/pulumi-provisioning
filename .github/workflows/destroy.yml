@@ -21,6 +21,9 @@ env:
 jobs:
   destroy:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write # Required for OIDC authentication
+      contents: read # Required to checkout code
     environment:
       name: ${{ github.event.inputs.stack }}-destroy
     steps:
@@ -53,7 +56,10 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          # Use appropriate role based on stack being destroyed
+          # For prod: use prod role (or fallback to default)
+          # For test: use test role (or fallback to default)
+          role-to-assume: ${{ github.event.inputs.stack == 'prod' && secrets.AWS_PROD_ROLE_ARN || github.event.inputs.stack == 'test' && secrets.AWS_TEST_ROLE_ARN || secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Setup Pulumi
@@ -68,11 +74,124 @@ jobs:
           pulumi stack select ${{ github.event.inputs.stack }}
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Set Pulumi Config from GitHub Secrets
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          # Pulumi needs config to properly destroy resources
+          # Set DB password if available (needed for RDS destroy)
+          if [ -n "${{ secrets.DB_PASSWORD }}" ]; then
+            pulumi config set --secret dbPassword "${{ secrets.DB_PASSWORD }}"
+          fi
+          # Set domain name if available
+          if [ -n "${{ secrets.DOMAIN_NAME }}" ]; then
+            pulumi config set domainName "${{ secrets.DOMAIN_NAME }}"
+          fi
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Preview Resources to be Destroyed
+        working-directory: infrastructure
+        run: |
+          source .venv/bin/activate
+          echo "=========================================="
+          echo "📋 Preview: Resources to be Destroyed"
+          echo "=========================================="
+          echo "Stack: ${{ github.event.inputs.stack }}"
+          echo ""
+          echo "This preview shows what will be destroyed:"
+          echo "- EC2 instance and Elastic IP"
+          echo "- RDS database instance"
+          echo "- S3 bucket and all objects"
+          echo "- ECR repository and all images"
+          echo "- VPC, subnets, security groups, gateways"
+          echo "- IAM roles and policies"
+          echo "- SSM parameters (db_password, image_tag)"
+          echo ""
+          echo "Running Pulumi preview..."
+          echo "=========================================="
+          pulumi preview --stack ${{ github.event.inputs.stack }} --diff
+        env:
+          PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Final Warning Before Destruction
+        run: |
+          echo "=========================================="
+          echo "⚠️  FINAL WARNING - INFRASTRUCTURE DESTRUCTION"
+          echo "=========================================="
+          echo "Stack: ${{ github.event.inputs.stack }}"
+          echo ""
+          echo "You are about to PERMANENTLY DELETE:"
+          echo "  ❌ All EC2 instances"
+          echo "  ❌ All RDS databases (data will be lost!)"
+          echo "  ❌ All S3 buckets and objects"
+          echo "  ❌ All ECR repositories and images"
+          echo "  ❌ All VPC networking resources"
+          echo "  ❌ All IAM roles and policies"
+          echo "  ❌ All SSM parameters"
+          echo ""
+          echo "This action CANNOT be undone!"
+          echo ""
+          echo "Waiting 10 seconds before proceeding..."
+          echo "=========================================="
+          sleep 10
 
       - name: Pulumi Destroy
         working-directory: infrastructure
         run: |
           source .venv/bin/activate
+          echo "=========================================="
+          echo "🗑️  Destroying Infrastructure"
+          echo "=========================================="
+          echo "Stack: ${{ github.event.inputs.stack }}"
+          echo ""
           pulumi destroy --yes --stack ${{ github.event.inputs.stack }}
+          echo ""
+          echo "=========================================="
+          echo "✅ Destruction Complete"
+          echo "=========================================="
         env:
           PULUMI_ACCESS_TOKEN: ${{ secrets.PULUMI_ACCESS_TOKEN }}
+          PULUMI_PYTHON_CMD: ${{ github.workspace }}/infrastructure/.venv/bin/python
+
+      - name: Destruction Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ Infrastructure Destruction Completed"
+            echo "=========================================="
+            echo "Stack: ${{ github.event.inputs.stack }}"
+            echo ""
+            echo "All resources have been destroyed:"
+            echo "  ✅ EC2 instances terminated"
+            echo "  ✅ RDS databases deleted"
+            echo "  ✅ S3 buckets deleted"
+            echo "  ✅ ECR repositories deleted"
+            echo "  ✅ VPC and networking resources deleted"
+            echo "  ✅ IAM roles and policies deleted"
+            echo "  ✅ SSM parameters deleted"
+            echo ""
+            echo "Note: Some resources may take a few minutes to fully delete."
+            echo "Check AWS Console to verify all resources are removed."
+          else
+            echo "❌ Infrastructure Destruction Failed"
+            echo "=========================================="
+            echo "Stack: ${{ github.event.inputs.stack }}"
+            echo ""
+            echo "Some resources may not have been destroyed."
+            echo "Check the logs above for errors."
+            echo ""
+            echo "Common issues:"
+            echo "  - RDS final snapshot creation failed"
+            echo "  - S3 bucket not empty"
+            echo "  - ECR repository has images"
+            echo "  - IAM role dependencies"
+            echo ""
+            echo "You may need to manually clean up remaining resources."
+          fi
+          echo "=========================================="
